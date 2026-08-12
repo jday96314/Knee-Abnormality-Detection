@@ -35,21 +35,25 @@ def derived_axes(frame: pd.DataFrame) -> pd.DataFrame:
     bits = frame["pooling"].str.split("-")
     frame["reducer"] = bits.str[0]
     frame["grouping"] = bits.str[1]
-    frame["balance"] = bits.apply(lambda b: "bal" in b)
+    frame["inner"] = bits.apply(
+        lambda b: "mean" if "bal" in b
+        else next((x[2:] for x in b if x.startswith("in")), "none"))
+    frame["across"] = bits.apply(
+        lambda b: next((x[2:] for x in b if x.startswith("ax")), "concat"))
     frame["central"] = bits.apply(lambda b: "ctr" in b)
     frame["slice_l2"] = bits.apply(lambda b: "l2" in b)
     return frame
 
 
-def main() -> None:
-    frame = derived_axes(pd.read_csv(RESULTS / "sweep.csv"))
+def main(csv: str = "sweep.csv") -> None:
+    frame = derived_axes(pd.read_csv(RESULTS / csv))
     pd.set_option("display.width", 200)
 
     print(f"{len(frame)} configurations, macro AUC "
           f"{frame.macro_auc.min():.4f} - {frame.macro_auc.max():.4f}\n")
 
     for axis in ["backbone", "size", "head", "reducer", "grouping",
-                 "balance", "central", "slice_l2"]:
+                 "inner", "across", "central", "slice_l2"]:
         print(f"-- {axis} " + "-" * (58 - len(axis)))
         print(axis_table(frame, axis).to_string(float_format=lambda v: f"{v:.4f}"))
         print()
@@ -98,4 +102,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main(sys.argv[1] if len(sys.argv) > 1 else "sweep.csv")

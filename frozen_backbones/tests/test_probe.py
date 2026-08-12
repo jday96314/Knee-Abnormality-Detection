@@ -117,6 +117,68 @@ def test_balance_weights_series_equally():
     features, meta = np.asarray(features), pd.DataFrame(rows)
 
     plain = probe.pool_studies(features, meta, ["s0"], probe.Pooling("mean"))
-    balanced = probe.pool_studies(features, meta, ["s0"], probe.Pooling("mean", balance=True))
+    balanced = probe.pool_studies(features, meta, ["s0"], probe.Pooling("mean", inner="mean"))
     assert np.allclose(plain, 2 / 32)
     assert np.allclose(balanced, 0.5)
+
+
+def test_inner_max_promotes_a_focal_finding():
+    """A finding on 2 of 40 slices survives inner=max and is diluted by a mean.
+
+    This is the whole point of hierarchical pooling: series A is 40 slices of
+    which 2 carry the finding, series B is 20 clean slices. A flat mean over the
+    study sees the finding at 2/60; collapsing each series by max first makes it
+    a full-strength component of one of the two series descriptors.
+    """
+    rows, features = [], []
+    for k in range(40):
+        rows.append({"study": "s0", "series": "A", "plane": "Sagittal",
+                     "fluid": 1, "fatsat": 1, "pos": (k + 0.5) / 40})
+        features.append(np.ones(4) if k in (18, 19) else np.zeros(4))
+    for k in range(20):
+        rows.append({"study": "s0", "series": "B", "plane": "Sagittal",
+                     "fluid": 1, "fatsat": 1, "pos": (k + 0.5) / 20})
+        features.append(np.zeros(4))
+    features, meta = np.asarray(features, float), pd.DataFrame(rows)
+
+    flat = probe.pool_studies(features, meta, ["s0"], probe.Pooling("mean"))
+    hier = probe.pool_studies(features, meta, ["s0"], probe.Pooling("mean", inner="max"))
+    assert np.allclose(flat, 2 / 60)
+    assert np.allclose(hier, 0.5)  # (max over A = 1, max over B = 0) -> mean
+
+
+def test_pooling_name_roundtrips():
+    from stage2 import parse_pooling
+    for pooling in [
+        probe.Pooling("mean"),
+        probe.Pooling("meanmax", "plane"),
+        probe.Pooling("mean", "all", "mean"),          # legacy "bal" spelling
+        probe.Pooling("meanmax", "plane", "max", central=True, l2=True),
+        probe.Pooling("mean", "fluid", "p90", central=True),
+        probe.Pooling("max", "plane", "max", "mean"),
+        probe.Pooling("meanmax", "plane", across="max"),
+    ]:
+        assert parse_pooling(pooling.name()) == pooling, pooling.name()
+
+
+def test_across_reduces_groups_instead_of_concatenating():
+    """`across` keeps the descriptor at D columns and skips absent planes."""
+    rows, features = [], []
+    for plane, value in [("Sagittal", 1.0), ("Coronal", 3.0)]:  # no axial series
+        for k in range(4):
+            rows.append({"study": "s0", "series": f"{plane}_a", "plane": plane,
+                         "fluid": 1, "fatsat": 1, "pos": (k + 0.5) / 4})
+            features.append(np.full(5, value))
+    features, meta = np.asarray(features), pd.DataFrame(rows)
+
+    concat = probe.pool_studies(features, meta, ["s0"], probe.Pooling("mean", "plane"))
+    assert concat.shape == (1, 15)
+    assert np.allclose(concat[0, 10:], 0.0)  # missing axial block is zero-filled
+
+    # Reducing across planes must ignore the absent one, not average a zero in.
+    assert np.allclose(
+        probe.pool_studies(features, meta, ["s0"], probe.Pooling("mean", "plane", across="mean")),
+        np.full((1, 5), 2.0))
+    assert np.allclose(
+        probe.pool_studies(features, meta, ["s0"], probe.Pooling("mean", "plane", across="max")),
+        np.full((1, 5), 3.0))

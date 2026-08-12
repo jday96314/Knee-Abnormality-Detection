@@ -36,15 +36,15 @@ POOLINGS = [
     probe.Pooling("mean", "fluid"), probe.Pooling("meanmax", "fluid"),
     probe.Pooling("mean", "plane_fluid"), probe.Pooling("meanmax", "plane_fluid"),
     # Weighting and slice-range variants of the two strongest plain reducers.
-    probe.Pooling("mean", balance=True), probe.Pooling("meanmax", balance=True),
-    probe.Pooling("mean", "plane", balance=True),
+    probe.Pooling("mean", inner="mean"), probe.Pooling("meanmax", inner="mean"),
+    probe.Pooling("mean", "plane", inner="mean"),
     probe.Pooling("mean", central=True), probe.Pooling("meanmax", central=True),
     probe.Pooling("mean", "plane", central=True),
     # Unit-normalizing each slice before pooling, across the same shapes.
     probe.Pooling("mean", l2=True), probe.Pooling("max", l2=True),
     probe.Pooling("meanmax", l2=True), probe.Pooling("meanmaxstd", l2=True),
     probe.Pooling("mean", "plane", l2=True), probe.Pooling("meanmax", "plane", l2=True),
-    probe.Pooling("mean", balance=True, l2=True),
+    probe.Pooling("mean", inner="mean", l2=True),
     probe.Pooling("meanmax", central=True, l2=True),
 ]
 

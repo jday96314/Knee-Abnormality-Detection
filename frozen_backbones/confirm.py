@@ -24,14 +24,27 @@ from stage2 import Pool, parse_pooling
 
 RESULTS = Pool  # re-exported for symmetry; the path lives in stage2/probe
 
+ORTHO_CLS = [("orthofoundation", 224, "cls")]
+ORTHO_STD = [("orthofoundation", 224, "patch_std")]
+MRI_CLS = [("mri_core", 224, "cls")]
+
 SHORTLIST = [
-    ("orthofoundation/224/patch_std", [("orthofoundation", 224, "patch_std")], "mean-plane-ctr-l2"),
-    ("orthofoundation/224/patch_std", [("orthofoundation", 224, "patch_std")], "meanmax-all-ctr"),
-    ("mri_core/224/cls", [("mri_core", 224, "cls")], "meanmax-all-bal"),
-    ("mri_core/224/cls", [("mri_core", 224, "cls")], "meanmax-plane"),
+    # Hierarchical leaders from hier.py.
+    ("orthofoundation/224/cls", ORTHO_CLS, "meanmax-plane-inp90-axmax-ctr"),
+    ("orthofoundation/224/cls", ORTHO_CLS, "max-all-inp90-ctr"),
+    ("orthofoundation/224/cls", ORTHO_CLS, "meanmax-all-inp90-ctr"),
+    ("orthofoundation/224/patch_std", ORTHO_STD, "meanmax-plane-axmean-ctr"),
+    # Matched controls: identical in every respect except the series level, so
+    # the difference is attributable to hierarchy alone rather than to the
+    # central trim or the plane grouping that the leaders also use.
+    ("orthofoundation/224/cls", ORTHO_CLS, "meanmax-plane-axmax-ctr"),
+    ("orthofoundation/224/cls", ORTHO_CLS, "meanmax-all-ctr"),
+    # Flat-bag leaders from the first sweep.
+    ("orthofoundation/224/patch_std", ORTHO_STD, "mean-plane-ctr-l2"),
+    ("mri_core/224/cls", MRI_CLS, "meanmax-all-bal"),
     # A deliberately plain reference point: the simplest thing anyone would try.
-    ("mri_core/224/cls", [("mri_core", 224, "cls")], "mean-all"),
-    ("orthofoundation/224/cls", [("orthofoundation", 224, "cls")], "mean-all"),
+    ("mri_core/224/cls", MRI_CLS, "mean-all"),
+    ("orthofoundation/224/cls", ORTHO_CLS, "mean-all"),
 ]
 
 

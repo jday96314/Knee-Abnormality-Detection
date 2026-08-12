@@ -94,7 +94,7 @@ def main(seeds: tuple[int, ...], top_k: int) -> None:
         source = (row.backbone, int(row.size), row.head)
         base = parse_pooling(row.pooling)
         for l2 in (False, True):
-            pooling = probe.Pooling(base.reduce, base.group, base.balance, base.central, l2)
+            pooling = probe.Pooling(base.reduce, base.group, base.inner, base.across, base.central, l2)
             key = (source, pooling)
             if key in seen:
                 continue
@@ -125,8 +125,16 @@ def main(seeds: tuple[int, ...], top_k: int) -> None:
 
 
 def parse_pooling(name: str) -> probe.Pooling:
+    """Inverse of Pooling.name(). "bal" is the legacy spelling of inner="mean"."""
     bits = name.split("-")
-    return probe.Pooling(bits[0], bits[1], "bal" in bits, "ctr" in bits, "l2" in bits)
+    inner = "mean" if "bal" in bits else ""
+    across = ""
+    for bit in bits:
+        if bit.startswith("in"):
+            inner = bit[2:]
+        elif bit.startswith("ax"):
+            across = bit[2:]
+    return probe.Pooling(bits[0], bits[1], inner, across, "ctr" in bits, "l2" in bits)
 
 
 if __name__ == "__main__":

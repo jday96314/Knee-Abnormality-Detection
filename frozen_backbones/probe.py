@@ -70,21 +70,36 @@ class Pooling:
 
     `group` splits the bag before reducing and concatenates the results, so the
     classifier sees which plane a response came from instead of averaging a
-    sagittal and an axial slice together. `balance` re-weights by series so a
-    320-slice acquisition does not outvote a 20-slice one. `central` drops the
-    ends of each stack, which on a knee series are off-joint.
+    sagittal and an axial slice together. `central` drops the ends of each stack,
+    which on a knee series are off-joint.
+
+    `inner` makes the pooling hierarchical: each series is first collapsed on its
+    own with `inner`, and `reduce` then runs across the resulting one-vector-per-
+    series bag. This is what lets a focal finding survive. A fracture visible on
+    two slices of a 40-slice series is a 5% perturbation of a flat mean over the
+    study, but `inner="max"` promotes it to that series' descriptor, where the
+    outer reduction sees it at full strength. It also decouples the two levels:
+    a max within series says "the strongest evidence in this acquisition", while
+    a mean across series says "how much of the protocol agrees".
+
+    `inner="mean"` is the special case that just re-weights series equally, so a
+    320-slice acquisition cannot outvote a 20-slice one; it is named `bal` for
+    continuity with the first sweep, which only had that one variant.
     """
 
     reduce: str = "mean"
     group: str = "all"          # all | plane | fluid | plane_fluid
-    balance: bool = False       # average within series first, then across series
+    inner: str = ""             # collapse each series first, then `reduce` across series
+    across: str = ""            # reduce across groups instead of concatenating them
     central: bool = False       # keep only the central half of each stack
     l2: bool = False            # unit-normalize each slice vector before pooling
 
     def name(self) -> str:
         bits = [self.reduce, self.group]
-        if self.balance:
-            bits.append("bal")
+        if self.inner:
+            bits.append("bal" if self.inner == "mean" else f"in{self.inner}")
+        if self.across:
+            bits.append(f"ax{self.across}")
         if self.central:
             bits.append("ctr")
         if self.l2:
@@ -136,6 +151,7 @@ def pool_studies(features: np.ndarray, meta: pd.DataFrame, studies: list[str],
     position = meta["pos"].to_numpy()
     rows = []
 
+    width = features.shape[1]
     for study in studies:
         in_study = study_of == study
         blocks = []
@@ -145,16 +161,32 @@ def pool_studies(features: np.ndarray, meta: pd.DataFrame, studies: list[str],
                 mask = mask & (position > 0.25) & (position < 0.75)
 
             if not mask.any():
-                probe = _reduce(np.zeros((1, features.shape[1]), np.float32), pooling.reduce)
+                # When groups are reduced across rather than concatenated, a
+                # missing plane is skipped entirely: zero-filling would make an
+                # absent acquisition compete in the max.
+                if pooling.across:
+                    continue
+                probe = _reduce(np.zeros((1, width), np.float32), pooling.reduce)
                 blocks.append(np.zeros_like(probe))
                 continue
 
             block = features[mask]
-            if pooling.balance:
+            if pooling.inner:
+                # One descriptor per series, then the outer reduction across them.
+                # `inner` must be a single-statistic reducer so every series
+                # contributes the same D columns.
                 series = meta.loc[mask, "series"].to_numpy()
-                block = np.stack([block[series == s].mean(0) for s in pd.unique(series)])
+                block = np.stack([_reduce(block[series == s], pooling.inner)
+                                  for s in pd.unique(series)])
             blocks.append(_reduce(block, pooling.reduce))
-        rows.append(np.concatenate(blocks))
+
+        if not pooling.across:
+            rows.append(np.concatenate(blocks))
+        elif blocks:
+            rows.append(_reduce(np.stack(blocks), pooling.across))
+        else:
+            rows.append(np.zeros(len(_reduce(np.zeros((1, width), np.float32),
+                                             pooling.reduce))))
 
     return np.asarray(rows, dtype=np.float64)
 

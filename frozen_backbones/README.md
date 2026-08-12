@@ -9,24 +9,26 @@ from 5-fold stratified CV on the 58 fully-labeled studies.
 
 | | macro AUC |
 |---|---|
-| Best configuration, 20 held-out CV seeds | **0.661 ± 0.013** |
-| Same, seed-averaged OOF predictions | **0.674**, 95% CI **[0.619, 0.727]** (bootstrap over studies) |
+| Best configuration, 20 held-out CV seeds | **0.665 ± 0.015** |
+| Same, seed-averaged OOF predictions | **0.685**, 95% CI **[0.630, 0.740]** (bootstrap over studies) |
+| Best flat-bag (non-hierarchical) configuration | 0.661 ± 0.013 |
 | Simplest thing that works (`mri_core/cls`, plain mean) | 0.652 ± 0.014 |
-| Labels shuffled (permutation baseline) | 0.496 ± 0.018 |
+| Labels shuffled (permutation baseline) | 0.493 ± 0.026 |
 
 Best configuration: **OrthoFoundation @ 224px, `patch_std` read-out,
-`mean-plane-ctr-l2` pooling** — per-plane mean over the central half of each
-stack, with each slice L2-normalized first.
+`meanmax-plane-axmean-ctr`** — over the central half of each stack, mean⊕max
+within each plane, then averaged across planes.
 
 **The honest reading.** The bootstrap CI over studies spans 0.11 of AUC. Every
 pooling strategy tested falls inside that interval. Pooling choice is worth about
-0.01 macro AUC; the 58-study cohort is worth ten times that in uncertainty. The
-ranking below is real but small, and it is a ranking over partitions of one small
-cohort, not a claim about new data.
+0.02 macro AUC end to end; the 58-study cohort is worth five times that in
+uncertainty. The rankings below are real -- the matched hierarchical comparisons
+hold at p<0.005 across 20 CV partitions -- but they are rankings over partitions
+of one small cohort, not claims about new data.
 
 ## What actually moved the metric
 
-Marginal medians over all 480 configurations (`python analyze.py`):
+Marginal medians over the 480 flat-bag configurations (`python analyze.py sweep.csv`):
 
 | Axis | Winner | Median | Runner-up | Median |
 |---|---|---|---|---|
@@ -50,30 +52,85 @@ Read in order of effect size:
    "what is generally here" and "what is the most extreme thing here".
 4. **Conditioning on plane helps a little**; conditioning on sequence type helps
    less. Note that `Fluid_Sensitive` and `Fat_Suppression` are perfectly
-   correlated in this cohort, so they are one binary variable, not two.
+   correlated in this cohort, so they are one binary variable, not two. Whether
+   the per-plane descriptors are concatenated or reduced across makes no
+   difference on average (see the hierarchical section), so the cheaper
+   dimension-preserving `across` form is preferable.
 5. **Trimming to the central half of each stack helps**, consistent with the ends
    of a knee series being off-joint.
 6. **Fusion hurts.** On the same five seeds, concatenating read-out heads (0.635)
    or both backbones (0.633) scores *below* the best single head (0.669). At n=58
    the extra columns cost more than the extra signal pays.
 
+## Hierarchical pooling: which level wants which reduction
+
+A study is a three-level object -- slices in a series, series in a plane, planes
+in a study -- and `hier.py` sweeps the reduction used at each level separately
+(288 configurations over the three leading backbone/head combinations):
+
+| Level | Options | Winner (median) |
+|---|---|---|
+| `inner` — collapse each series | none, mean, max, `p90` | **p90** 0.642, vs none 0.636, max 0.634 |
+| `reduce` — combine series within a plane | mean, max, `mean⊕max` | **mean⊕max** 0.640 |
+| `across` — combine planes | concat, mean, max | wash (0.636 / 0.638 / 0.634) |
+| `central` — trim stack ends | on/off | **on** 0.643 vs 0.631 |
+
+**Adding a series level helps, but only if it preserves within-series extremes.**
+Matched pairs, identical except for the inner reduction, 20 held-out seeds,
+`orthofoundation/224/cls`:
+
+| Hierarchical | Flat control | Δ | p |
+|---|---|---|---|
+| `max-all-inp90-ctr` | `max-all-ctr` | **+0.022** | <0.001 |
+| `meanmax-all-inp90-ctr` | `meanmax-all-ctr` | **+0.015** | <0.001 |
+| `meanmax-plane-inp90-axmax-ctr` | `meanmax-plane-axmax-ctr` | **+0.009** | 0.003 |
+| `meanmax-all-bal` (inner=**mean**) | `meanmax-all` | **−0.009** | 0.012 |
+
+A soft-max (p90) within series helps; a *mean* within series actively hurts,
+which is why the first sweep -- whose only two-level option was `bal` -- found
+hierarchy useless. Averaging within a series and then again across them discards
+slice-level variation twice.
+
+**The gain is exactly where the mechanism predicts.** Per-label effect of adding
+p90-within-series (`max-all-inp90-ctr` vs `max-all-ctr`):
+
+| Focal findings | Δ AUC | | Diffuse findings | Δ AUC |
+|---|---|---|---|---|
+| MCL | +0.084 | | Medial OA | +0.005 |
+| Contusion | +0.051 | | Lateral Meniscus | +0.005 |
+| PF OA | +0.049 | | Effusion | +0.001 |
+| Lateral OA | +0.042 | | Synovitis | −0.003 |
+| Baker's | +0.029 | | ACL | −0.007 |
+| Fracture | +0.022 | | Medial Meniscus | −0.011 |
+
+Findings visible on a handful of slices in one acquisition gain; findings visible
+on most slices of most series do not. Collapsing a series by a soft-max before
+pooling preserves focal evidence that a flat reduction dilutes into 1/180th of a
+study average.
+
+**A cautionary note on the sweep's top line.** The best single-seed configuration
+out of the 288 scored 0.692; on 20 held-out seeds the same configuration scores
+**0.648** -- below six others in the shortlist. Picking the maximum of a few
+hundred noisy estimates buys about 0.03 of pure selection bias. Only the matched
+comparisons above, and the held-out re-scoring in `confirm.py`, are load-bearing.
+
 ## Per-label
 
 Leading configuration, 20 held-out seeds:
 
-| Finding | Positives | AUC | | Finding | Positives | AUC |
-|---|---|---|---|---|---|---|
-| Medial OA | 15 | 0.789 | | Lateral OA | 11 | 0.678 |
-| Effusion | 35 | 0.719 | | MCL | 9 | 0.651 |
-| Lateral Meniscus | 23 | 0.717 | | Contusion | 19 | 0.630 |
-| ACL | 24 | 0.697 | | Baker's | 12 | 0.572 |
-| Medial Meniscus | 26 | 0.687 | | PF OA | 21 | 0.563 |
-| Synovitis | 27 | 0.680 | | Fracture | 18 | 0.552 |
+| Finding | Positives | AUC | Finding | Positives | AUC |
+|---|---|---|---|---|---|
+| Medial OA | 15 | 0.786 | Lateral Meniscus | 23 | 0.665 |
+| Lateral OA | 11 | 0.750 | Contusion | 19 | 0.635 |
+| ACL | 24 | 0.736 | MCL | 9 | 0.627 |
+| Effusion | 35 | 0.704 | PF OA | 21 | 0.622 |
+| Synovitis | 27 | 0.693 | Baker's | 12 | 0.543 |
+| Medial Meniscus | 26 | 0.681 | Fracture | 18 | 0.543 |
 
-Across all 480 configurations, Medial OA and Effusion beat chance in essentially
-every run; Baker's cyst is above 0.5 in under half of them and Contusion in 59%.
-Those two are not being detected — whichever configuration tops a ranked list has
-picked them up by chance.
+Across the 480 flat-bag configurations, Medial OA and Effusion beat chance in
+essentially every run; Baker's cyst was above 0.5 in under half of them and
+Contusion in 59%. Hierarchical pooling rescued Contusion (0.635) but not Baker's
+or Fracture, both of which remain at chance and should be read as undetected.
 
 ## Backbone notes
 
@@ -144,8 +201,10 @@ python data.py 448                                   # decode cache (~2 min)
 for b in mri_core orthofoundation; do
   for s in 224 448; do python extract.py --backbone $b --size $s; done
 done                                                 # features (~5 min, GPU)
-python sweep.py --out sweep.csv                      # 480 configs (~2 h)
-python analyze.py                                    # marginal effect of each axis
+python sweep.py --out sweep.csv                      # 480 flat-bag configs (~2 h)
+python hier.py --out hier.csv                        # 288 hierarchical configs (~1 h)
+python analyze.py sweep.csv                          # marginal effect of each axis
+python analyze.py hier.csv
 python stage2.py --seeds 5 --top-k 6                 # L2, head/backbone fusion
 python confirm.py --first-seed 100 --n-seeds 20      # held-out seeds + permutation
 python -m pytest tests/                              # pooling and speedup correctness

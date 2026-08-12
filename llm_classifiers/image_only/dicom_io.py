@@ -15,11 +15,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import json
 import os
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -229,13 +230,46 @@ def select_series(series: pd.DataFrame, uid: str, plan: str) -> list[SeriesRef]:
 # ---------------------------------------------------------------------------
 
 
+ORDER_CACHE_DIR: Path | None = None
+
+
+def set_order_cache(path: Path | None) -> None:
+    """Where to persist slice orderings between processes and runs."""
+    global ORDER_CACHE_DIR
+    ORDER_CACHE_DIR = path
+    if path is not None:
+        path.mkdir(parents=True, exist_ok=True)
+
+
 @lru_cache(maxsize=4096)
 def ordered_slice_paths(series_dir: str) -> tuple[str, ...]:
     """Slice file paths in through-plane order.
 
     InstanceNumber is used when it is present and unique; otherwise slices are
     ordered by their position projected onto the slice normal.
+
+    Establishing the order means reading a header from every slice in the series —
+    on the order of a hundred reads per study, which on a slow disk costs more than
+    decoding the handful of slices actually wanted. The result depends only on the
+    files, so it is memoised to disk as well as in process memory.
     """
+    if ORDER_CACHE_DIR is not None:
+        digest = hashlib.sha256(series_dir.encode()).hexdigest()[:20]
+        cache_file = ORDER_CACHE_DIR / f"{digest}.json"
+        if cache_file.exists():
+            try:
+                return tuple(json.loads(cache_file.read_text()))
+            except (json.JSONDecodeError, OSError):
+                pass  # a corrupt or half-written entry is simply recomputed
+        order = _compute_slice_order(series_dir)
+        tmp = cache_file.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(order))
+        os.replace(tmp, cache_file)
+        return order
+    return _compute_slice_order(series_dir)
+
+
+def _compute_slice_order(series_dir: str) -> tuple[str, ...]:
     paths = [str(p) for p in sorted(Path(series_dir).iterdir()) if p.suffix == ".dcm"]
     keys: list[tuple[float, str]] = []
     numbers: list[float] = []
@@ -262,17 +296,27 @@ def ordered_slice_paths(series_dir: str) -> tuple[str, ...]:
     return tuple(path for _, path in keys)
 
 
-def sample_indices(n_slices: int, n_take: int, center_fraction: float = 0.7) -> list[int]:
+def sample_indices(
+    n_slices: int, n_take: int, center_fraction: float = 0.7, phase: float = 0.0
+) -> list[int]:
     """Evenly spaced indices from the central `center_fraction` of the stack.
 
     The first and last slices of a knee series are usually off-joint, so the
     default trims them before sampling.
+
+    `phase` shifts the sampling grid by that fraction of one inter-sample step. It is
+    the basis of slice-selection test-time augmentation: the same series viewed
+    through a different set of slices, which for a sparse subsample is a genuinely
+    different look at the joint rather than a re-roll of the same one.
     """
     if n_take >= n_slices:
         return list(range(n_slices))
     span = max(1.0, n_slices * center_fraction)
     start = (n_slices - span) / 2.0
-    return [int(round(start + span * (i + 0.5) / n_take)) for i in range(n_take)]
+    return [
+        int(round(start + span * min(i + 0.5 + phase, n_take - 0.01) / n_take))
+        for i in range(n_take)
+    ]
 
 
 def slab_bounds(n_slices: int, n_slabs: int, center_fraction: float) -> list[tuple[int, int]]:
@@ -323,7 +367,7 @@ def _window(array: np.ndarray, header: Any, mode: str) -> np.ndarray:
     return array
 
 
-def render_slice(path: str, size: int, window: str) -> Image.Image:
+def render_slice(path: str, size: int, window: str, flip: bool = False) -> Image.Image:
     """Decode one slice to a square 8-bit grayscale image, preserving aspect ratio."""
     dataset = pydicom.dcmread(path, force=True)
     pixels = dataset.pixel_array
@@ -341,10 +385,10 @@ def render_slice(path: str, size: int, window: str) -> Image.Image:
     )
     canvas = Image.new("L", (size, size), color=0)
     canvas.paste(resized, ((size - resized.width) // 2, (size - resized.height) // 2))
-    return canvas
+    return canvas.transpose(Image.FLIP_LEFT_RIGHT) if flip else canvas
 
 
-def reduce_slab(paths: list[str], size: int, window: str, mode: str) -> Image.Image:
+def reduce_slab(paths: list[str], size: int, window: str, mode: str, flip: bool = False) -> Image.Image:
     """Collapse a contiguous slab of slices into one image.
 
     `slab_mip` takes the per-pixel maximum, the standard way to keep a small bright
@@ -353,7 +397,7 @@ def reduce_slab(paths: list[str], size: int, window: str, mode: str) -> Image.Im
     suppresses noise but dilutes exactly those focal findings.
     """
     stack = np.stack(
-        [np.asarray(render_slice(path, size, window), dtype=np.float32) for path in paths]
+        [np.asarray(render_slice(path, size, window, flip), dtype=np.float32) for path in paths]
     )
     collapsed = stack.max(axis=0) if mode == "slab_mip" else stack.mean(axis=0)
     return Image.fromarray(collapsed.astype(np.uint8), mode="L")
@@ -371,16 +415,32 @@ def montage(images: list[Image.Image], size: int) -> Image.Image:
     return canvas
 
 
-def png_data_uri(image: Image.Image, cache_path: Path | None = None) -> str:
+def png_data_uri(make_image: Callable[[], Image.Image], cache_path: Path | None = None) -> str:
+    """Encode an image as a data URI, rendering it only if it is not already cached.
+
+    The image is passed as a thunk rather than a value so that a cache hit skips the
+    DICOM decode as well as the PNG encode. Decoding is by far the expensive half —
+    several seconds per study — so evaluating it eagerly made a warm cache almost
+    worthless.
+    """
+    payload = b""
     if cache_path is not None and cache_path.exists():
         payload = cache_path.read_bytes()
-    else:
+        # A truncated entry is worse than a missing one: the server rejects it with an
+        # opaque "cannot identify image file" and the cell fails for every finding that
+        # uses that study. Cheap to detect here from the PNG magic and IEND trailer.
+        if not (payload.startswith(b"\x89PNG\r\n\x1a\n") and payload.endswith(b"IEND\xaeB`\x82")):
+            payload = b""
+
+    if not payload:
         buffer = io.BytesIO()
-        image.save(buffer, format="PNG", optimize=True)
+        make_image().save(buffer, format="PNG", optimize=True)
         payload = buffer.getvalue()
         if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = cache_path.with_suffix(".tmp")
+            # Unique per writer, then renamed atomically: two processes rendering the
+            # same image must never share a temporary path or they interleave bytes.
+            tmp = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.{id(payload):x}.tmp")
             tmp.write_bytes(payload)
             os.replace(tmp, cache_path)
     return "data:image/png;base64," + base64.b64encode(payload).decode()
@@ -411,12 +471,21 @@ class ImageSpec:
     stride: int = 8  # proportional sampling: take roughly every stride-th slice
     max_images: int = 32  # study-level ceiling; images are shared out across series
     center_fraction: float = 0.7
+    # Test-time augmentation. `phase` shifts which slices are sampled; `flip` mirrors
+    # the image left-right. Note that a left-right flip is not anatomically neutral
+    # here: on coronal and axial images it swaps medial for lateral, and on sagittal
+    # it swaps anterior for posterior, so it is expected to damage exactly the
+    # laterality-dependent findings. That is why it is measured per finding.
+    phase: float = 0.0
+    flip: bool = False
 
     def key(self) -> str:
+        suffix = f"-ph{self.phase:g}" if self.phase else ""
+        suffix += "-flip" if self.flip else ""
         return (
             f"{self.plan}-s{self.slices_per_series}-p{self.size}"
             f"-{self.window}-{self.layout}-{self.sampling}"
-            f"-st{self.stride}-m{self.max_images}-c{self.center_fraction}"
+            f"-st{self.stride}-m{self.max_images}-c{self.center_fraction}{suffix}"
         )
 
     def budget(self) -> int:
@@ -516,43 +585,62 @@ def build_study_images(
             continue
         n_slices = len(paths)
 
+        # Each renderer is a thunk: png_data_uri only calls it on a cache miss, so a
+        # warm cache costs a file read rather than a DICOM decode.
         if spec.sampling in ("slab_mip", "slab_mean"):
             bounds = slab_bounds(n_slices, n_take, spec.center_fraction)
-            rendered = [
-                reduce_slab(list(paths[lower:upper]), spec.size, spec.window, spec.sampling)
+            renderers = [
+                partial(
+                    reduce_slab,
+                    list(paths[lower:upper]),
+                    spec.size,
+                    spec.window,
+                    spec.sampling,
+                    spec.flip,
+                )
                 for lower, upper in bounds
             ]
             tags = [f"{lower}-{upper}" for lower, upper in bounds]
             kind = "maximum-intensity projection" if spec.sampling == "slab_mip" else "average"
             detail = f"each image is the {kind} of a contiguous slab of slices"
         else:
-            indices = sample_indices(n_slices, n_take, spec.center_fraction)
-            rendered = [render_slice(paths[i], spec.size, spec.window) for i in indices]
+            indices = sample_indices(n_slices, n_take, spec.center_fraction, spec.phase)
+            renderers = [
+                partial(render_slice, paths[i], spec.size, spec.window, spec.flip)
+                for i in indices
+            ]
             tags = [str(i) for i in indices]
             detail = f"sampled from a {n_slices}-slice acquisition"
 
         if spec.layout == "montage":
-            tile = montage(rendered, spec.size)
             cache = (
                 cache_dir / uid / f"{ref.series_uid}_montage_{spec.key()}.png"
                 if cache_dir
                 else None
             )
             caption = (
-                f"{ref.caption()}; {len(rendered)} slices tiled left-to-right, "
+                f"{ref.caption()}; {len(renderers)} slices tiled left-to-right, "
                 f"top-to-bottom, ordered through the joint, {detail}"
             )
-            output.append((caption, png_data_uri(tile, cache)))
+            # A montage is one cache entry, so its tiles are rendered only together.
+            output.append(
+                (
+                    caption,
+                    png_data_uri(
+                        lambda: montage([make() for make in renderers], spec.size), cache
+                    ),
+                )
+            )
         else:
-            for position, (tag, image) in enumerate(zip(tags, rendered), start=1):
+            for position, (tag, make_image) in enumerate(zip(tags, renderers), start=1):
                 cache = (
                     cache_dir / uid / f"{ref.series_uid}_{tag}_{spec.key()}.png"
                     if cache_dir
                     else None
                 )
                 caption = (
-                    f"{ref.caption()}; image {position} of {len(rendered)}, {detail}"
+                    f"{ref.caption()}; image {position} of {len(renderers)}, {detail}"
                 )
-                output.append((caption, png_data_uri(image, cache)))
+                output.append((caption, png_data_uri(make_image, cache)))
 
     return output

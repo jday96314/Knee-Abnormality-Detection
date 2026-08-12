@@ -1,0 +1,79 @@
+{
+  "cohort": "n58_7f8220fe8f",
+  "n_studies": 58,
+  "positives": {
+    "ACL": 24,
+    "MCL": 9,
+    "Medial Meniscus": 26,
+    "Lateral Meniscus": 23,
+    "Medial OA": 15,
+    "Lateral OA": 11,
+    "PF OA": 21,
+    "Effusion": 35,
+    "Synovitis": 27,
+    "Baker's": 12,
+    "Contusion": 19,
+    "Fracture": 18
+  },
+  "best_condition": "qwen_digit_t07_x3",
+  "best_macro_auc": 0.64473857696852,
+  "conditions_scored": [
+    "qwen_checklist_think",
+    "qwen_digit",
+    "qwen_digit_hires",
+    "qwen_digit_t07_x3",
+    "qwen_digit_targeted",
+    "qwen_fewshot2_digit",
+    "qwen_fewshot2_yesno",
+    "qwen_joint_likert",
+    "qwen_joint_likert_think",
+    "qwen_joint_prob_think",
+    "qwen_questions_think",
+    "qwen_two_stage",
+    "qwen_two_stage_think",
+    "qwen_words"
+  ],
+  "ensemble": {
+    "members": [
+      "qwen_digit_t07_x3",
+      "qwen_digit_targeted"
+    ],
+    "macro_auc": 0.6477463913274556,
+    "ci": [
+      0.5948673628395035,
+      0.6988119048358095
+    ],
+    "contrasts": {
+      "qwen_digit_t07_x3": {
+        "difference": 0.003007814358935601,
+        "ci": [
+          -0.018346287377229785,
+          0.024901126805950732
+        ],
+        "p": 0.7604
+      },
+      "qwen_digit_targeted": {
+        "difference": 0.009226730382704607,
+        "ci": [
+          -0.013099873660886418,
+          0.03231045855141216
+        ],
+        "p": 0.4232
+      }
+    },
+    "per_label": {
+      "ACL": 0.5471813725490197,
+      "MCL": 0.6009070294784581,
+      "Medial Meniscus": 0.6039663461538461,
+      "Lateral Meniscus": 0.5366459627329192,
+      "Medial OA": 0.6364341085271318,
+      "Lateral OA": 0.4410058027079304,
+      "PF OA": 0.5637065637065637,
+      "Effusion": 0.8795031055900621,
+      "Synovitis": 0.6863799283154122,
+      "Baker's": 0.7391304347826086,
+      "Contusion": 0.6700404858299596,
+      "Fracture": 0.8680555555555556
+    }
+  }
+}

@@ -55,6 +55,7 @@ from dicom_io import (
     cohort_id,
     complete_labeled_studies,
     image_count,
+    set_order_cache,
     plan_study_images,
     slices_represented,
 )
@@ -71,6 +72,7 @@ from prompts import (
 )
 from prompts_v2 import (
     DIGIT_VALUES,
+    WORDS5,
     WORDS_LP_VALUES,
     FEWSHOT_SYSTEM,
     QUESTIONS_SYSTEM,
@@ -131,6 +133,13 @@ class Condition:
     background: bool = False  # prepend report-derived background on what to look at
     few_shot: int = 0  # labelled examples per class, drawn from other studies
     view_targeted: bool = False  # show only the plane that can answer this finding
+    # Test-time augmentation: "slices", "flip", or "slices+flip". Each repeat becomes a
+    # different view of the same study rather than a different sampling seed, so the
+    # diversity being averaged is in the images, not in the decoder.
+    tta: str = ""
+    # Qwen exposes a thinking mode through the chat template; MedGemma does not use
+    # this field. None leaves the server default alone.
+    thinking: bool | None = None
 
     # Strategies scored from the first generated token's logprob distribution. These
     # cannot degenerate to a constant and need no output parsing, and unlike a 5- or
@@ -380,6 +389,105 @@ def build_conditions() -> dict[str, Condition]:
                 answer_format="digit", axis="v2_fewshot", max_tokens=1),
     ]
 
+    # =====================================================================
+    # Round three: test-time augmentation. Each repeat is a different *view*
+    # of the same study at temperature 0, so what is averaged is image
+    # diversity rather than decoder noise — the two can then be compared.
+    # =====================================================================
+
+    # `v2_digit` and `v2_two_stage_t07_x5` were the joint leaders, so TTA is applied to
+    # both. The digit conditions stay at temperature 0: any spread in their scores comes
+    # purely from the augmentation, which makes them the clean test of whether looking
+    # again at different slices is worth anything on its own.
+    tta_variants = [
+        ("slices", 3), ("slices", 5), ("flip", 2), ("slices+flip", 6),
+    ]
+    for mode, n in tta_variants:
+        tag = mode.replace("+", "_")
+        conditions.append(
+            replace(REFERENCE, name=f"v3_digit_tta_{tag}{n}", strategy="binary_digit",
+                    answer_format="digit", tta=mode, samples=n, temperature=0.0,
+                    axis="v3_tta", max_tokens=1)
+        )
+    conditions += [
+        # Slice TTA on top of sampling, to see whether the two sources of diversity add.
+        replace(REFERENCE, name="v3_digit_tta_slices3_t07", strategy="binary_digit",
+                answer_format="digit", tta="slices", samples=3, temperature=0.7,
+                top_p=0.95, axis="v3_tta", max_tokens=1),
+        # The other leading family, augmented the same way.
+        replace(REFERENCE, name="v3_two_stage_tta_slices3", strategy="two_stage",
+                answer_format="likert", tta="slices", samples=3, temperature=0.0,
+                axis="v3_tta", max_tokens=1400),
+        replace(REFERENCE, name="v3_two_stage_tta_slices3_t07", strategy="two_stage",
+                answer_format="likert", tta="slices", samples=3, temperature=0.7,
+                top_p=0.95, axis="v3_tta", max_tokens=1400),
+        # Denser slices as a control: is TTA doing anything a single richer view would
+        # not? Six slices per series in one request costs the same tokens as three
+        # requests of four, without the extra round trips.
+        replace(REFERENCE, name="v3_digit_dense6", strategy="binary_digit",
+                answer_format="digit", image=ImageSpec(slices_per_series=6),
+                axis="v3_tta", max_tokens=1),
+    ]
+
+    # =====================================================================
+    # Qwen3.6-27B on mlserver3. Multimodal, ~7x the parameters, and unlike
+    # MedGemma it has an explicit thinking mode. Run with:
+    #   --base-url http://mlserver3:8000/v1 --model Qwen/Qwen3.6-27B-FP8
+    #   --out-dir artifacts_qwen
+    # into a separate artifacts directory, because a condition name means a
+    # different thing on a different model.
+    # =====================================================================
+
+    # Thinking and logprob scoring are mutually exclusive: the expected-value trick
+    # reads the answer from the first few token positions, and a reasoning block puts
+    # thousands of tokens in front of it. So thinking conditions parse their answer
+    # from the content instead, and pay for the tokens.
+    # Qwen tokenises by pixel area: measured at 787 tokens/image at 896px against
+    # MedGemma's fixed 256. Running at 448px costs 199 tokens/image, which makes this
+    # the *token-matched* comparison and cuts prefill fourfold; `qwen_digit_hires`
+    # keeps one pixel-matched control so the resolution effect is measured, not assumed.
+    qwen_image = ImageSpec(size=448)
+    conditions += [
+        replace(REFERENCE, name="qwen_digit", strategy="binary_digit", image=qwen_image,
+                answer_format="digit", thinking=False, axis="qwen", max_tokens=1),
+        replace(REFERENCE, name="qwen_digit_hires", strategy="binary_digit",
+                image=ImageSpec(size=896), answer_format="digit", thinking=False,
+                axis="qwen", max_tokens=1),
+        replace(REFERENCE, name="qwen_digit_targeted", strategy="binary_digit",
+                answer_format="digit", thinking=False, view_targeted=True,
+                image=qwen_image, axis="qwen", max_tokens=1),
+        replace(REFERENCE, name="qwen_words", strategy="binary_words",
+                answer_format="words_lp", thinking=False, image=qwen_image, axis="qwen", max_tokens=4),
+        replace(REFERENCE, name="qwen_joint_likert", strategy="joint_definitions",
+                answer_format="likert", thinking=False, image=qwen_image, axis="qwen"),
+        replace(REFERENCE, name="qwen_joint_likert_think", strategy="joint_definitions",
+                answer_format="likert", thinking=True, image=qwen_image, axis="qwen", max_tokens=20000),
+        replace(REFERENCE, name="qwen_joint_prob_think", strategy="joint_definitions",
+                thinking=True, image=qwen_image, axis="qwen", max_tokens=20000),
+        replace(REFERENCE, name="qwen_checklist_think", strategy="joint_checklist",
+                answer_format="likert", thinking=True, image=qwen_image, axis="qwen", max_tokens=20000),
+        replace(REFERENCE, name="qwen_two_stage", strategy="two_stage",
+                answer_format="likert", thinking=False, image=qwen_image, axis="qwen", max_tokens=1400),
+        replace(REFERENCE, name="qwen_two_stage_think", strategy="two_stage",
+                answer_format="likert", thinking=True, image=qwen_image, axis="qwen", max_tokens=20000),
+        replace(REFERENCE, name="qwen_questions_think", strategy="two_stage_questions",
+                answer_format="words5", thinking=True, image=qwen_image, axis="qwen", max_tokens=20000),
+        # Few-shot failed outright on the 4B model; a 27B reasoner is the fairest
+        # retest of whether that was a capability limit rather than a bad idea.
+        replace(REFERENCE, name="qwen_fewshot2_digit", strategy="fewshot_digit",
+                few_shot=2, view_targeted=True, answer_format="digit", thinking=False,
+                image=ImageSpec(slices_per_series=3, max_images=12, size=448), axis="qwen",
+                max_tokens=1),
+        replace(REFERENCE, name="qwen_fewshot2_yesno", strategy="fewshot_yesno",
+                few_shot=2, view_targeted=True, thinking=False,
+                image=ImageSpec(slices_per_series=3, max_images=12, size=448), axis="qwen",
+                max_tokens=1),
+        # Averaged sampling, the other thing that worked on MedGemma.
+        replace(REFERENCE, name="qwen_digit_t07_x3", strategy="binary_digit",
+                answer_format="digit", thinking=False, temperature=0.7, top_p=0.95,
+                samples=3, image=qwen_image, axis="qwen", max_tokens=1),
+    ]
+
     return {condition.name: condition for condition in conditions}
 
 
@@ -399,6 +507,8 @@ SWEEPS = {
     "v2_verbal": [n for n, c in CONDITIONS.items() if c.axis == "v2_verbal"],
     "v2_average": [n for n, c in CONDITIONS.items() if c.axis == "v2_average"],
     "v2_fewshot": [n for n, c in CONDITIONS.items() if c.axis == "v2_fewshot"],
+    "v3": [n for n, c in CONDITIONS.items() if c.axis == "v3_tta"],
+    "qwen": [n for n, c in CONDITIONS.items() if c.axis == "qwen"],
     "all": list(CONDITIONS),
 }
 
@@ -409,11 +519,29 @@ SWEEPS = {
 
 
 def answer_property(answer_format: str) -> dict[str, Any]:
+    """The JSON type a guided answer must take, per answer scale.
+
+    Every word scale needs an entry here. A missing one falls through to `number`
+    while the prompt still asks for words, and the model then writes an opening brace
+    and stalls on whitespace until it hits the token cap — which looks exactly like
+    the model degenerating, but is a schema/prompt mismatch.
+    """
     if answer_format == "percent_int":
         return {"type": "integer", "minimum": 0, "maximum": 100}
     if answer_format == "likert":
         return {"type": "string", "enum": LIKERT}
+    if answer_format == "words5":
+        return {"type": "string", "enum": WORDS5}
+    if answer_format in ("words_lp", "digit"):
+        # Scored from logprobs, never from a parsed joint object.
+        return {"type": "string", "enum": list(scale_values_for(answer_format))}
     return {"type": "number", "minimum": 0, "maximum": 1}
+
+
+def scale_values_for(answer_format: str) -> dict[str, float]:
+    if answer_format == "digit":
+        return DIGIT_VALUES
+    return WORDS_LP_VALUES
 
 
 def joint_schema(answer_format: str = "probability") -> dict[str, Any]:
@@ -640,10 +768,8 @@ YESNO_VALUES = {"no": 0.0, "yes": 1.0}
 
 def scale_values(condition: "Condition") -> dict[str, float]:
     """The answer options a logprob-scored condition is renormalised over."""
-    if condition.answer_format == "digit":
-        return DIGIT_VALUES
-    if condition.answer_format in ("words5", "words_lp"):
-        return WORDS_LP_VALUES
+    if condition.answer_format in ("digit", "words_lp", "words5"):
+        return scale_values_for(condition.answer_format)
     return YESNO_VALUES
 
 
@@ -654,6 +780,112 @@ def scale_values(condition: "Condition") -> dict[str, float]:
 
 def seed_for(parts: str) -> int:
     return int.from_bytes(hashlib.sha256(parts.encode()).digest()[:4], "big")
+
+
+def spec_for(condition: Condition, label: str, repeat: int = 0) -> ImageSpec:
+    """The image spec for one request.
+
+    Narrowed to the plane that answers `label` when view targeting is on, and turned
+    into the `repeat`-th augmented view when TTA is on. Module-level so the cache
+    pre-warmer can enumerate exactly the specs the runner will ask for.
+    """
+    spec = condition.image
+    if condition.view_targeted and label in FINDING_PLAN:
+        spec = replace(spec, plan=FINDING_PLAN[label])
+    if condition.tta:
+        spec = replace(spec, **tta_variant(condition, repeat))
+    return spec
+
+
+def required_specs(names: list[str]) -> dict[str, ImageSpec]:
+    """Every distinct image spec the given conditions will request, keyed by spec key."""
+    specs: dict[str, ImageSpec] = {}
+    for name in names:
+        condition = CONDITIONS[name]
+        labels = LABELS if condition.per_label else ["__joint__"]
+        for repeat in range(max(condition.samples, 1)):
+            for label in labels:
+                spec = spec_for(condition, label, repeat)
+                specs.setdefault(spec.key(), spec)
+    return specs
+
+
+_WARM: dict[str, Any] = {}
+
+
+def _warm_init(data_dir: str, series_csv: str, cache_dir: str) -> None:
+    _WARM["data_dir"] = Path(data_dir)
+    _WARM["series"] = pd.read_csv(series_csv)
+    _WARM["cache_dir"] = Path(cache_dir)
+    set_order_cache(Path(cache_dir) / "_slice_order")
+
+
+def _warm_one(job: tuple[str, ImageSpec]) -> int:
+    uid, spec = job
+    try:
+        return len(
+            build_study_images(
+                _WARM["data_dir"], _WARM["series"], uid, spec, _WARM["cache_dir"]
+            )
+        )
+    except Exception:  # noqa: BLE001 - a study that cannot render will fail loudly later
+        return 0
+
+
+def warm_cache(
+    data_dir: Path, uids: list[str], names: list[str], workers: int, cache_dir: Path
+) -> None:
+    """Render every image the run will need, in parallel, before any request is sent.
+
+    Decoding and rendering one study costs several seconds of CPU against about a
+    second of GPU per request, so an async runner that renders inline leaves the
+    server idle and the local machine saturated. Rendering is pure CPU and trivially
+    parallel, so it belongs in a process pool ahead of time; afterwards every request
+    hits the on-disk PNG cache and the run is bound by the model, as it should be.
+    """
+    import multiprocessing as mp
+
+    specs = required_specs(names)
+    jobs = [(uid, spec) for spec in specs.values() for uid in uids]
+    print(
+        f"warming image cache: {len(specs)} specs x {len(uids)} studies "
+        f"= {len(jobs)} study-renders on {workers} workers",
+        flush=True,
+    )
+    series_csv = str(data_dir / "train_series.csv")
+    started = time.perf_counter()
+    done = 0
+    with mp.Pool(
+        workers,
+        initializer=_warm_init,
+        initargs=(str(data_dir), series_csv, str(cache_dir)),
+    ) as pool:
+        for _ in pool.imap_unordered(_warm_one, jobs, chunksize=4):
+            done += 1
+            if done % 100 == 0 or done == len(jobs):
+                rate = done / max(time.perf_counter() - started, 1e-6)
+                print(
+                    f"  warmed {done}/{len(jobs)} ({rate:.1f} study-renders/s)", flush=True
+                )
+    print(f"cache warm in {time.perf_counter() - started:.0f}s", flush=True)
+
+
+def tta_variant(condition: Condition, repeat: int) -> dict[str, Any]:
+    """Which augmented view the `repeat`-th request of a TTA condition should use.
+
+    Slice phases are spread evenly across one inter-sample step, so with n repeats the
+    union of the views covers the stack n times more densely than any single view.
+    Flip alternates fastest so that a "slices+flip" run always pairs each phase with
+    both orientations rather than leaving the pairing to chance.
+    """
+    if condition.tta == "flip":
+        return {"flip": bool(repeat % 2)}
+    if condition.tta == "slices":
+        return {"phase": (repeat % max(condition.samples, 1)) / max(condition.samples, 1)}
+    if condition.tta == "slices+flip":
+        n_phases = max(condition.samples // 2, 1)
+        return {"phase": (repeat // 2) % n_phases / n_phases, "flip": bool(repeat % 2)}
+    raise ValueError(f"unknown tta mode {condition.tta!r}")
 
 
 def image_content(images: list[tuple[str, str]]) -> list[dict[str, Any]]:
@@ -679,6 +911,7 @@ class Runner:
         concurrency: int,
         max_retries: int,
         labels: pd.DataFrame | None = None,
+        image_cache: Path | None = None,
     ) -> None:
         self.client = client
         self.model = model
@@ -689,6 +922,10 @@ class Runner:
         # Only ever read by few-shot conditions, and only for studies other than the
         # one being scored.
         self.labels = labels
+        # Rendered PNGs depend only on the DICOMs and the spec, never on the model, so
+        # runs against different servers should share one cache rather than each
+        # paying the several-seconds-per-study rendering cost again.
+        self.image_cache = image_cache or (out_dir / "image_cache")
         self.semaphore = asyncio.Semaphore(concurrency)
         self.max_retries = max_retries
         self.write_lock = asyncio.Lock()
@@ -696,11 +933,8 @@ class Runner:
         self._image_lock = asyncio.Lock()
         self._reading_cache: dict[tuple[str, str], str] = {}
 
-    def spec_for(self, condition: Condition, label: str) -> ImageSpec:
-        """The image spec for one request, narrowed to the plane that answers `label`."""
-        if condition.view_targeted and label in FINDING_PLAN:
-            return replace(condition.image, plan=FINDING_PLAN[label])
-        return condition.image
+    def spec_for(self, condition: Condition, label: str, repeat: int = 0) -> ImageSpec:
+        return spec_for(condition, label, repeat)
 
     def select_examples(
         self, uid: str, label: str, condition: Condition
@@ -740,7 +974,7 @@ class Runner:
             self.series,
             uid,
             spec,
-            self.out_dir / "image_cache",
+            self.image_cache,
         )
         if not images:
             raise ValueError(f"no series matched plan {spec.plan!r} for study {uid}")
@@ -748,9 +982,11 @@ class Runner:
             self._image_cache[key] = images
         return images
 
-    async def describe(self, uid: str, condition: Condition, seed: int) -> tuple[str, Any]:
+    async def describe(
+        self, uid: str, condition: Condition, seed: int, spec: ImageSpec
+    ) -> tuple[str, Any]:
         """Stage one of the two-stage strategy: a free-text reading of the images."""
-        images = await self.images_for(uid, condition.image)
+        images = await self.images_for(uid, spec)
         captions = [caption for caption, _ in images]
         completion = await self.client.chat.completions.create(
             model=self.model,
@@ -765,16 +1001,25 @@ class Runner:
             temperature=condition.temperature,
             top_p=condition.top_p,
             seed=seed,
-            max_tokens=1200,
+            # A thinking model spends its whole budget reasoning and returns empty
+            # content, so the description stage needs the condition's full allowance.
+            max_tokens=max(1200, condition.max_tokens) if condition.thinking else 1200,
+            **(
+                {"extra_body": {"chat_template_kwargs": {"enable_thinking": condition.thinking}}}
+                if condition.thinking is not None
+                else {}
+            ),
         )
         reading = strip_thinking(completion.choices[0].message.content or "")
         if not reading:
             raise ValueError("describe stage returned no text")
         return reading, completion.usage
 
-    async def read_out(self, uid: str, condition: Condition, seed: int) -> tuple[str, Any]:
+    async def read_out(
+        self, uid: str, condition: Condition, seed: int, spec: ImageSpec
+    ) -> tuple[str, Any]:
         """Stage one of `two_stage_questions`: answers to a fixed structured read-out."""
-        images = await self.images_for(uid, condition.image)
+        images = await self.images_for(uid, spec)
         captions = [caption for caption, _ in images]
         completion = await self.client.chat.completions.create(
             model=self.model,
@@ -794,7 +1039,12 @@ class Runner:
             temperature=condition.temperature,
             top_p=condition.top_p,
             seed=seed,
-            max_tokens=1600,
+            max_tokens=max(1600, condition.max_tokens) if condition.thinking else 1600,
+            **(
+                {"extra_body": {"chat_template_kwargs": {"enable_thinking": condition.thinking}}}
+                if condition.thinking is not None
+                else {}
+            ),
         )
         answers = strip_thinking(completion.choices[0].message.content or "")
         if not answers:
@@ -805,7 +1055,7 @@ class Runner:
         self, condition: Condition, job: Job
     ) -> tuple[list[dict[str, Any]], int]:
         """Labelled examples for this finding, then the study under test."""
-        spec = self.spec_for(condition, job.label)
+        spec = self.spec_for(condition, job.label, job.repeat)
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
@@ -838,7 +1088,7 @@ class Runner:
 
     async def run_one(self, condition: Condition, job: Job) -> dict[str, Any]:
         seed = seed_for(f"{condition.name}|{job.uid}|{job.label}|{job.repeat}")
-        spec = self.spec_for(condition, job.label)
+        spec = self.spec_for(condition, job.label, job.repeat)
         images = await self.images_for(job.uid, spec)
         captions = [caption for caption, _ in images]
         n_images = len(images)
@@ -852,7 +1102,7 @@ class Runner:
             messages, n_images = await self.fewshot_messages(condition, job)
             schema = single_schema(condition.answer_format)
         elif condition.strategy == "two_stage_questions":
-            reading, stage_one_usage = await self.read_out(job.uid, condition, seed)
+            reading, stage_one_usage = await self.read_out(job.uid, condition, seed, spec)
             messages = [
                 {"role": "system", "content": SYSTEM_BASE},
                 {
@@ -894,7 +1144,7 @@ class Runner:
             ]
             schema = single_schema(condition.answer_format)
         elif condition.strategy == "two_stage":
-            reading, stage_one_usage = await self.describe(job.uid, condition, seed)
+            reading, stage_one_usage = await self.describe(job.uid, condition, seed, spec)
             messages = [
                 {"role": "system", "content": SYSTEM_BASE},
                 {"role": "user", "content": score_reading_prompt(reading) + scale},
@@ -938,6 +1188,10 @@ class Runner:
             "seed": seed,
             "max_tokens": condition.max_tokens,
         }
+        if condition.thinking is not None:
+            request["extra_body"] = {
+                "chat_template_kwargs": {"enable_thinking": condition.thinking}
+            }
         if condition.uses_logprobs:
             request.update(logprobs=True, top_logprobs=20)
             # A word scale needs constraining or the model opens with markdown "**"
@@ -984,8 +1238,10 @@ class Runner:
 
         return {
             "condition": condition.name,
+            "model": self.model,
             "cohort": self.cohort,
             "image_spec": spec.key(),
+            "base_image_spec": condition.image.key(),
             "uid": job.uid,
             "label": job.label,
             "repeat": job.repeat,
@@ -1070,6 +1326,7 @@ class Runner:
                                 "condition": condition.name,
                                 "cohort": self.cohort,
                                 "image_spec": condition.image.key(),
+                                "base_image_spec": condition.image.key(),
                                 "uid": job.uid,
                                 "label": job.label,
                                 "repeat": job.repeat,
@@ -1128,7 +1385,8 @@ def load_cache_keys(path: Path, image_spec: str) -> set[tuple[str, str, int]]:
             if not line:
                 continue
             record = json.loads(line)
-            if record.get("image_spec") != image_spec:
+            recorded = record.get("base_image_spec") or record.get("image_spec")
+            if recorded != image_spec:
                 continue
             if not record.get("ok"):
                 continue
@@ -1200,6 +1458,21 @@ async def main_async(args: argparse.Namespace) -> None:
 
     labeled.to_csv(out_dir / "cohort_labels.csv", index=False)
 
+    image_cache_dir = Path(args.image_cache_dir) if args.image_cache_dir else out_dir / "image_cache"
+    # Slice orderings are pure functions of the files on disk, so they are shared with
+    # the image cache rather than recomputed per run and per worker process.
+    set_order_cache(image_cache_dir / "_slice_order")
+
+    if args.warm_cache:
+        import os as _os
+
+        workers = args.warm_workers or max(1, (_os.cpu_count() or 4) - 2)
+        needs_examples = any(CONDITIONS[n].few_shot for n in names)
+        warm_uids = (
+            example_pool["StudyInstanceUID"].tolist() if needs_examples else uids
+        )
+        warm_cache(data_dir, warm_uids, names, workers, image_cache_dir)
+
     client = AsyncOpenAI(base_url=args.base_url, api_key=args.api_key, timeout=args.timeout)
     runner = Runner(
         client=client,
@@ -1211,6 +1484,7 @@ async def main_async(args: argparse.Namespace) -> None:
         concurrency=args.concurrency,
         max_retries=args.max_retries,
         labels=example_pool,
+        image_cache=image_cache_dir,
     )
 
     manifest = {
@@ -1412,6 +1686,21 @@ def parse_args() -> argparse.Namespace:
         help="report image and token cost per condition without calling the model",
     )
     parser.add_argument("--context-length", type=int, default=131072)
+    parser.add_argument(
+        "--warm-cache",
+        action="store_true",
+        help="pre-render every image the run needs in a process pool, then continue. "
+        "Rendering is CPU-bound and inline rendering leaves the GPU idle",
+    )
+    parser.add_argument(
+        "--warm-workers", type=int, default=0, help="processes for --warm-cache (default: cores-2)"
+    )
+    parser.add_argument(
+        "--image-cache-dir",
+        default="",
+        help="share rendered PNGs across runs; they depend on the DICOMs and the image "
+        "spec, never on the model. Defaults to <out-dir>/image_cache",
+    )
     args = parser.parse_args()
     if not args.sweep and not args.condition:
         args.sweep = ["all"]

@@ -243,6 +243,27 @@ Every condition on both axes returned successfully, so the ladder is runnable en
   image information — which is what makes the prompt and answer-scale axes the ones worth
   spending the larger cohort on.
 
+## Throughput: warm the image cache first
+
+Rendering a study's images costs **several seconds of CPU**; a request costs about **one second
+of GPU**. Rendering inline inside the async runner therefore starves the server — measured on this
+setup, vLLM sat at **0 requests running** with local load at 9 and throughput at 0.28 req/s.
+
+`--warm-cache` pre-renders every image spec the selected conditions will ask for, in a process
+pool, before any request is sent:
+
+```bash
+python llm_classifiers/image_only/run_medgemma_experiments.py \
+    --sweep v3 --warm-cache --warm-workers 14 --concurrency 24
+```
+
+Same work, after warming: **18 concurrent requests on the server, 2.66 req/s — 9.5× faster**, and
+the run is bound by the model rather than by local CPU. Always warm before a sweep that introduces
+new image specs; conditions that reuse existing specs hit the on-disk PNG cache anyway.
+
+Test-time augmentation makes this essential rather than merely nice: every phase shift and flip is
+a distinct spec, so a TTA sweep starts with a completely cold cache.
+
 ## Caching and resumption
 
 Successful records are appended to `artifacts/raw/<condition>.jsonl` immediately, keyed by

@@ -15,8 +15,8 @@
     "Contusion": 19,
     "Fracture": 18
   },
-  "best_condition": "v2_digit",
-  "best_macro_auc": 0.6594271574825558,
+  "best_condition": "v3_two_stage_tta_slices3_t07",
+  "best_macro_auc": 0.678259499404446,
   "conditions_scored": [
     "ctx_128img_32k",
     "ctx_16img_4k",
@@ -79,49 +79,57 @@
     "v2_two_stage_background",
     "v2_two_stage_t07_x5",
     "v2_words",
-    "v2_words_targeted"
+    "v2_words_targeted",
+    "v3_digit_dense6",
+    "v3_digit_tta_flip2",
+    "v3_digit_tta_slices3",
+    "v3_digit_tta_slices3_t07",
+    "v3_digit_tta_slices5",
+    "v3_digit_tta_slices_flip6",
+    "v3_two_stage_tta_slices3",
+    "v3_two_stage_tta_slices3_t07"
   ],
   "ensemble": {
     "members": [
-      "v2_digit",
-      "v2_two_stage_t07_x5"
+      "v3_two_stage_tta_slices3_t07",
+      "v3_digit_tta_slices_flip6"
     ],
-    "macro_auc": 0.688876849858327,
+    "macro_auc": 0.7090047340824825,
     "ci": [
-      0.6374647471334187,
-      0.7386907227420858
+      0.6598558938675146,
+      0.7552298436886915
     ],
     "contrasts": {
-      "v2_digit": {
-        "difference": 0.02944969237577122,
+      "v3_two_stage_tta_slices3_t07": {
+        "difference": 0.03074523467803658,
         "ci": [
-          0.004225490856541229,
-          0.056228543081023964
+          0.004233539882314733,
+          0.0577365200148146
         ],
-        "p": 0.0204
+        "p": 0.022
       },
-      "v2_two_stage_t07_x5": {
-        "difference": 0.02970237503057238,
+      "v3_digit_tta_slices_flip6": {
+        "difference": 0.031815830152018054,
         "ci": [
-          -0.0031437495158462884,
-          0.059632706103562236
+          0.0024956835412320772,
+          0.06439802633016853
         ],
-        "p": 0.08
+        "p": 0.0332
       }
     },
     "per_label": {
-      "ACL": 0.6029411764705882,
-      "MCL": 0.4897959183673469,
-      "Medial Meniscus": 0.6189903846153846,
-      "Lateral Meniscus": 0.6888198757763975,
-      "Medial OA": 0.6984496124031008,
-      "Lateral OA": 0.7437137330754352,
-      "PF OA": 0.6068211068211068,
-      "Effusion": 0.906832298136646,
-      "Synovitis": 0.7287933094384708,
-      "Baker's": 0.6865942028985508,
-      "Contusion": 0.7031039136302294,
-      "Fracture": 0.7916666666666666
+      "ACL": 0.5778186274509803,
+      "MCL": 0.54421768707483,
+      "Medial Meniscus": 0.6893028846153846,
+      "Lateral Meniscus": 0.7341614906832298,
+      "Medial OA": 0.6744186046511628,
+      "Lateral OA": 0.6818181818181818,
+      "PF OA": 0.7239382239382239,
+      "Effusion": 0.8826086956521739,
+      "Synovitis": 0.7616487455197133,
+      "Baker's": 0.6657608695652174,
+      "Contusion": 0.757085020242915,
+      "Fracture": 0.8152777777777778
     }
   }
 }

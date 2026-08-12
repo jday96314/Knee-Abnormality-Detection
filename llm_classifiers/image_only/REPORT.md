@@ -1,26 +1,131 @@
 # Image-only knee-abnormality experiment report
 
-How accurately can `google/medgemma-1.5-4b-it` identify the twelve findings in
-`data/from_host/documentation.md` **from MRI pixels alone**? Two rounds of experiments, 65
-conditions, 13,432 logged requests.
+How accurately can a vision-language model identify the twelve findings in
+`data/from_host/documentation.md` **from MRI pixels alone**? Three rounds against
+`google/medgemma-1.5-4b-it`, plus a fourth against `Qwen/Qwen3.6-27B-FP8`. 79 conditions,
+~35,000 logged requests, all on the same 58 labeled studies.
 
 ## Headline
 
-**Macro ROC AUC 0.689 (95% case-bootstrap CI 0.638–0.739)** on all 58 labeled studies, from the
-rank-average of two conditions that fail on different findings:
+**Macro ROC AUC 0.723 (95% case-bootstrap CI 0.676–0.768)**, from rank-averaging three conditions
+across both models. The honest ladder:
 
-- `v2_digit` — ask per finding "rate 0–5 how confident you are", generate **one token**, and take
-  the expected value over the digit distribution in its logprobs. 0.659 alone, ~1s per request.
-- `v2_two_stage_t07_x5` — describe the images in free text, score that description on an ordinal
-  word scale, five sampled repeats averaged. 0.659 alone.
+| | AUC | 95% CI |
+|---|---:|---:|
+| Cross-model ensemble (MedGemma ×2 + Qwen) | **0.723** | 0.676–0.768 |
+| MedGemma TTA ensemble | 0.709 | 0.660–0.755 |
+| Best single condition (`v3_two_stage_tta_slices3_t07`) | 0.678 | 0.628–0.728 |
+| Round-two best single (`v2_digit`) | 0.659 | 0.603–0.714 |
+| Round-one best (`format_likert_two_stage`) | 0.634 | 0.600–0.673 |
 
-The best single condition is either of those at **0.659 (CI 0.603–0.714)**. Round one's best was
-0.634, so single-condition gains from round two are real but modest and *not* statistically
-separable; the ensemble gain over `v2_digit` is (+0.029, CI +0.004 to +0.056, p=0.020).
+Every step up that ladder is real but **none of the individual steps is statistically separable on
+58 studies**. Only the ensemble-versus-its-own-members contrasts clear significance. Treat 0.634 →
+0.723 as the honest span of what prompt, decoding and augmentation choices bought, not as five
+distinguishable methods.
 
-Effusion is now at **0.907** and fracture at **0.792**, but MCL remains at chance. For scale: the
-text-only pipeline in `../text_only/` reaches 0.909 macro AUC on these same studies. Reports
-*state* the findings; images only *show* them.
+Effusion reaches **0.928** and fracture **0.879**. MCL, at chance for three rounds, finally moves to
+0.632 — and only because Qwen sees it. For scale: the text-only pipeline in `../text_only/` reaches
+0.909 on these same studies. Reports *state* the findings; images only *show* them.
+
+## The single most useful recommendation
+
+If you want one cheap thing: **ask per finding for a 0–5 confidence, generate exactly one token,
+and take the expected value over the digit distribution in the logprobs.** That is `v2_digit`,
+0.659 at ~1–2 s per request, no output parsing, and structurally incapable of the constant-output
+collapse that dominated round one. Everything above it costs 3–30× more for at most +0.06.
+
+## Round three: test-time augmentation
+
+Each repeat is a different *view* of the same study at temperature 0, so what is averaged is image
+diversity rather than decoder noise.
+
+| Condition | AUC | 95% CI |
+|---|---:|---:|
+| Ensemble of the two TTA leaders | **0.709** | 0.660–0.755 |
+| `v3_two_stage_tta_slices3_t07` | 0.678 | 0.628–0.728 |
+| `v3_digit_tta_slices_flip6` | 0.677 | 0.623–0.727 |
+| `v3_digit_tta_slices3` | 0.669 | 0.615–0.721 |
+| `v2_digit` (no TTA baseline) | 0.659 | 0.603–0.714 |
+| `v3_digit_tta_flip2` (flip only) | 0.655 | 0.598–0.708 |
+| **`v3_digit_dense6` (matched-token control)** | **0.634** | 0.571–0.693 |
+
+**The control is the finding.** Six slices in one request costs the same tokens as three requests
+of four, and scores *worse than the four-slice baseline*. So TTA's gain is not extra pixels — it is
+averaging separate looks. Showing this model more at once hurts; showing it the same amount three
+times and averaging helps. The same pattern appears independently on Qwen, where 896 px scores
+below 448 px.
+
+**Flip TTA: an anatomical prediction, half confirmed.** A left-right flip swaps medial for lateral
+on coronal and axial images, and anterior for posterior on sagittal, so it should damage the
+laterality-dependent findings. Measured:
+
+| group | mean flip Δ | mean slice-TTA Δ |
+|---|---:|---:|
+| laterality-dependent | −0.004 | +0.002 |
+| laterality-neutral | −0.005 | +0.017 |
+
+No selective damage to medial/lateral — those slightly improved. The one clear casualty is **ACL,
+−0.061**, exactly the sagittal anterior/posterior swap that puts the ACL where the PCL belongs. So
+the geometry mattered only for the cruciate; the model is evidently not using image side to tell
+medial from lateral, which fits it being weak at both. Flip alone is net negative, but combined
+with slice diversity it is the joint-best single condition — the ensemble diversity outweighs the
+anatomical corruption.
+
+## Round four: a 7x larger model
+
+`Qwen/Qwen3.6-27B-FP8` is multimodal, so the identical pipeline runs against it unchanged. It also
+has an explicit thinking mode, which MedGemma does not.
+
+| Condition | AUC | 95% CI | s/req |
+|---|---:|---:|---:|
+| `qwen_digit_t07_x3` | 0.645 | 0.592–0.695 | 44 |
+| `qwen_digit_targeted` | 0.639 | 0.585–0.692 | 20 |
+| `qwen_digit` (448 px) | 0.635 | 0.585–0.682 | 48 |
+| **`qwen_digit_hires` (896 px)** | **0.621** | 0.566–0.674 | 162 |
+| `qwen_fewshot2_yesno` | 0.591 | 0.540–0.640 | 65 |
+| `qwen_joint_prob_think` | 0.581 | 0.533–0.627 | 237 |
+| `qwen_checklist_think` | 0.504 | 0.460–0.549 | 269 |
+
+**The 27B general model loses to the 4B medical one** — 0.645 against MedGemma's 0.659 single and
+0.709 ensemble. Two controls stop this being an artefact of how Qwen was configured:
+
+- *Resolution is not the explanation.* Qwen tokenises by pixel area (787 tokens/image at 896 px
+  against MedGemma's fixed 256), so the sweep ran at 448 px — 199 tokens/image, i.e. **token
+  matched**. The pixel-matched control at 896 px scores **worse** (0.621 vs 0.635) for 3.4× the
+  tokens and 3.4× the latency. More pixels hurt Qwen too.
+- *The strategy ranking transfers.* On both models the digit-logprob family wins, two-stage and
+  joint-ordinal sit mid-table, and few-shot underperforms zero-shot. The round-two conclusions are
+  about how these models answer, not about MedGemma specifically.
+
+**Reasoning makes it worse, expensively.** With yields at ~1.0 after the token budgets were fixed:
+
+| | reasoning on | reasoning off |
+|---|---:|---:|
+| mean macro AUC (matched families) | 0.544 | 0.615 |
+| mean latency | 250 s | 65 s |
+| mean completion tokens | **6,623** | **67** |
+
+Matched pairs: `two_stage_think` −0.065 (CI −0.123 to −0.004, p=0.036); `joint_likert_think`
+−0.053 (p=0.161). Roughly 99× the output tokens and 4× the latency to lose 0.07 AUC.
+
+**Few-shot is now better characterised.** 0.581–0.591 on 27B against chance-level 0.49 on 4B, so
+the larger model *can* use examples — it just still does worse with them than without. Few-shot is
+below zero-shot on both models.
+
+### The two models are complementary where it counts
+
+| Finding | MedGemma ens. | Qwen | both |
+|---|---:|---:|---:|
+| Effusion | 0.883 | 0.877 | **0.928** |
+| Fracture | 0.815 | 0.847 | **0.879** |
+| Baker's | 0.666 | **0.734** | 0.733 |
+| MCL | 0.544 | **0.630** | **0.632** |
+| Lateral Meniscus | **0.734** | 0.540 | 0.731 |
+| PF OA | **0.724** | 0.568 | 0.706 |
+
+Qwen is worse overall yet clearly better on MCL, Baker's and fracture, which is why the cross-model
+ensemble reaches 0.723. That gain over MedGemma alone is +0.014 (p=0.29) — suggestive, not
+established.
 
 ## Round two: what improved it, and what did not
 
@@ -58,8 +163,17 @@ intervals are tight (0.443–0.541) and it held from pilot to full run. Showing 
 example knees does not help it judge a new one.
 
 **Report-derived background was roughly neutral** (+0.02 on two-stage, −0.01 on digit, neither
-significant). The 13-question structured read-out worked but beat nothing, and combining it with
-the word scale collapsed completely.
+significant). The 13-question structured read-out worked but beat nothing it was compared against.
+
+> **Correction.** An earlier version of this report said that combining the read-out with the word
+> scale "collapsed completely". That was a bug in the harness, not the model. `answer_property`
+> had no case for the `words5` scale and silently fell through to `{"type": "number"}`, so guided
+> decoding demanded a number while the prompt asked for a word; the model emitted `{"ACL":` and
+> stalled on whitespace until the token cap. The symptom — `flat = 1.00`, twelve constant labels —
+> is indistinguishable from genuine degeneracy in the metrics table. With the schema fixed the
+> condition parses 54–58/58 and produces varying scores. What exposed it was Qwen failing 58/58 the
+> same way: two unrelated models hitting an identical wall pointed at the code rather than either
+> model.
 
 **The unguided two-stage is settled**: rejected on yield twice (0.87 both times), even after
 quadrupling its token budget. Its failures are empty responses, not truncation.
@@ -270,6 +384,50 @@ blocked by infrastructure — the conditions failed on model behaviour, not capa
 
 `ctx_256img_64k` averaged 204s per request and 41,678 prompt tokens to produce a score that ranked
 nothing. It is the clearest illustration of the report's main finding.
+
+## Harness failures that looked like model failures
+
+Three bugs in this codebase produced symptoms that read naturally as model behaviour. They are
+recorded because the misreading is the interesting part, not the fix.
+
+| Bug | Symptom | Why it misleads |
+|---|---|---|
+| `words5` missing from the guided-schema map | `flat = 1.00`, twelve constant labels | Identical in the metrics to real degeneracy, which this model genuinely does elsewhere |
+| Two-stage describe stage hardcoded to 1,200 tokens | 58/58 "returned no text" | A thinking model spends the whole budget reasoning and returns empty content |
+| Joint reasoning capped at 8,000 tokens | 45% truncated, scored 0.51–0.58 | Looked like "reasoning doesn't work"; answers actually cost ~7,230 tokens |
+
+The last one mattered most for conclusions: the first reading of the reasoning conditions measured
+the token budget, not reasoning. Only after raising the cap and reaching ~1.0 yield does the real
+result appear — reasoning still loses, but by 0.07 rather than by 0.13, and for a defensible reason
+rather than truncation.
+
+A fourth was pure infrastructure: **one corrupt PNG out of 25,564** failed 42 cells across five
+conditions, surfacing as an opaque server-side `cannot identify image file`. Two warm-pool workers
+had rendered the same image to the same temporary path and interleaved their bytes. Because one
+cached file serves all twelve findings of a study, a single bad file multiplies into twelve
+failures per condition. The cache now uses per-writer temporary paths, verifies the PNG magic and
+`IEND` trailer on read, and silently re-renders a bad entry.
+
+## Throughput, and a metric that lies
+
+Rendering a study costs several seconds of CPU; a request costs about a second of GPU. Rendering
+inline inside the async runner therefore starves the server — measured at **0 concurrent requests
+and 0.28 req/s** while local load sat at 9. Three fixes, all measured:
+
+| Fix | Effect |
+|---|---|
+| `--warm-cache`, parallel pre-render in a process pool | 0 → 18 concurrent, 0.28 → 2.66 req/s |
+| Lazy render: check the cache *before* decoding the DICOM | a cache hit no longer pays the decode |
+| Disk-cached slice ordering | **30×** on a warm study (0.59 s → 0.02 s) |
+
+The third was the largest: establishing through-plane order meant reading a header from every slice
+(~120 per study) on a slow disk, memoised only per process.
+
+**`vllm:num_requests_running` is not a saturation metric.** It reports the active prefill batch, not
+queue depth. Qwen showed `1` while actually serving ~52 concurrent requests — inferred correctly
+only from throughput × latency (0.28 req/s × 185 s). An isolation test confirmed parallelism was
+fine: 16 requests took 229 s against 198 s for one. The real constraint was 787 tokens/image at
+896 px, fixed by moving to 448 px.
 
 ## Limitations
 

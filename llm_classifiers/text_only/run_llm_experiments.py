@@ -502,9 +502,9 @@ async def async_main(args: argparse.Namespace) -> None:
     await client.close()
 
     # Compile only when every configured experiment is complete.
-    if set(selected) == set(EXPERIMENTS) or all(
+    if not args.skip_compile and (set(selected) == set(EXPERIMENTS) or all(
         (out_dir / "raw" / f"{name}.jsonl").exists() for name in EXPERIMENTS
-    ):
+    )):
         features = compile_features(data, out_dir)
         features.to_csv(out_dir / "llm_features.csv", index=False)
         write_runtime_summary(out_dir)
@@ -520,6 +520,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=48)
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument(
+        "--skip-compile",
+        action="store_true",
+        help="Run/cache inference without rebuilding the shared feature table.",
+    )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument(

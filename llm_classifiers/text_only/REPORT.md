@@ -3,15 +3,25 @@
 ## Recommendation
 
 Use the `joint_latent` prompt, which asks for all 12 labels in one request and asks the model to
-infer the likely true abnormality despite possible errors or omissions in the report. Run it with
-thinking disabled, temperature 0.6, and three independent seeded samples per report. Average the
-three probabilities separately for each target. This was the best evaluated predictor at
-**0.9088 macro ROC AUC** (case-bootstrap 95% CI 0.8782–0.9347).
-The corresponding columns are named `joint_latent_first3_average__<label>` in
-`artifacts/all_predictions.csv`.
+infer the likely true abnormality despite possible errors or omissions in the report. Keep
+thinking disabled and temperature at 0.6.
+
+- **Cost/performance default:** average five independently seeded probabilities per target.
+- **Maximum stability tested:** average ten probabilities. If only ROC AUC matters and the whole
+  prediction batch is available, averaging each run's within-target percentile ranks was slightly
+  better than probability averaging (0.9048 vs 0.9042), but the difference was very small.
+- **Faster option:** request probabilities only, omitting evidence status and confidence. This
+  reduced mean request latency from about 23.6 to 14.0 seconds and completion tokens by 66%, with
+  five-run AUC decreasing from 0.9039 to 0.9007.
+
+The original first-three-seed average scored **0.9088 macro ROC AUC** (case-bootstrap 95% CI
+0.8782–0.9347), but the later ten-seed analysis showed that this prefix was unusually favorable.
+Across all 120 three-of-ten subsets, mean AUC was 0.9016. It should therefore not be treated as the
+expected gain from exactly three reruns. Those original prediction columns remain named
+`joint_latent_first3_average__<label>` in `artifacts/all_predictions.csv`.
 
 Do not use a learned stacker on this dataset, and do not pay for long reasoning based on these
-results. Five samples also did not improve over the original three.
+results. No alternative prompt or sampling temperature produced a validated improvement.
 
 ## Approaches tested
 
@@ -49,6 +59,9 @@ The non-prompt comparisons were:
 - Raw LLM methods are evaluated on all 58 labeled rows because they never see labels in prompts.
 - Learned methods use 10 repeats of stratified 5-fold out-of-fold prediction. Every scored row is
   excluded from the model fit that scores it.
+- Logistic feature ablations also report mean AUC within the 50 held-out folds. This avoids
+  penalizing a method merely because independently fitted folds place probabilities on slightly
+  different scales when their predictions are pooled.
 - Confidence intervals and pre-specified method contrasts use 5,000 paired case bootstrap
   samples. They capture case-sampling uncertainty but not prompt-selection uncertainty.
 - This is still an exploratory test set: prompt and method choices were developed against these
@@ -58,15 +71,15 @@ The non-prompt comparisons were:
 
 | Method | Macro AUC | 95% bootstrap CI | Notes |
 |---|---:|---:|---|
-| All targets jointly, infer actual abnormality (`joint_latent`), first 3 samples averaged | **0.9088** | 0.8782–0.9347 | Recommended |
+| All targets jointly, infer actual abnormality (`joint_latent`), favorable first 3 seeds averaged | **0.9088** | 0.8782–0.9347 | Highest observed, but seed-subset analysis shows optimism |
 | Joint rank ensemble | 0.9043 | 0.8732–0.9319 | No gain |
-| All targets jointly, infer actual abnormality (`joint_latent`), 5 samples averaged | 0.9040 | 0.8722–0.9312 | Worse than first 3 |
+| All targets jointly, infer actual abnormality (`joint_latent`), first 5 samples averaged | 0.9040 | 0.8722–0.9312 | Near rerun-count plateau |
 | All-prompt rank ensemble | 0.9033 | 0.8712–0.9316 | No gain |
 | Two-stage native reasoning | 0.8977 | 0.8666–0.9249 | Much slower |
 | All targets jointly, stay close to explicit evidence (`joint_extract`) | 0.8947 | 0.8653–0.9217 | Weaker than actual-abnormality prompt |
 | One target/request, infer actual abnormality (`individual_latent`) | 0.8829 | 0.8480–0.9141 | 12 requests/report |
-| OOF per-condition stack | 0.8330 | 0.7885–0.8726 | Overfits despite target isolation |
-| OOF cross-condition stack | 0.8041 | 0.7617–0.8417 | Worse than per-condition stack |
+| OOF per-condition full-feature stack | 0.8320 | 0.7881–0.8714 | Overfits despite target isolation |
+| OOF cross-condition full-feature stack | 0.7974 | 0.7537–0.8365 | Worse than per-condition stack |
 | OOF word/character hashing baseline | 0.5700 | 0.5077–0.6316 | Weak with 58 multilingual reports |
 
 Key paired contrasts:
@@ -77,11 +90,86 @@ Key paired contrasts:
   p=0.0012.
 - Two-stage reasoning vs three-sample joint latent: −0.0110, CI −0.0261 to +0.0029,
   p=0.1172.
-- Cross-condition vs per-condition OOF stack: −0.0289, CI −0.0562 to −0.0028,
-  p=0.0340.
+- Cross-condition vs per-condition OOF stack: −0.0346, CI −0.0620 to −0.0077,
+  p=0.0112.
 - Five-sample vs first-three average: −0.0048, CI −0.0102 to −0.0003, p=0.0404.
   This sample-count comparison was added adaptively and should not be read as proof that exactly
   three samples is universally optimal.
+
+## Raw-probability refinement study
+
+The follow-up held the basic all-target, thinking-disabled design fixed and varied prompt wording,
+temperature, output schema, aggregation, and rerun count. Prompt/temperature comparisons used
+five fixed samples per report:
+
+| Configuration | What changed from `joint_latent` | Five-run macro AUC |
+|---|---|---:|
+| Baseline, temperature 0.6 | Original actual-abnormality prompt | **0.9039** |
+| Probability-only, temperature 0.6 | Removed evidence status and confidence from the response | 0.9007 |
+| Independent image-review framing, temperature 0.6 | Asked for the label an independent reviewer of the source MRI would assign | 0.8991 |
+| Decomposed prompt, temperature 0.6 | Instructed the model to internally separate evidence, sentence reliability, secondary signs, and reconciliation | 0.8979 |
+| Skeptical prompt, temperature 0.6 | Restricted indirect inference to diagnostically specific secondary signs | 0.8966 |
+| Baseline, temperature 0.2 | Lower sampling temperature | 0.8965 |
+| Baseline, temperature 1.0 | Higher sampling temperature | 0.8960 |
+
+None differed significantly from the temperature-0.6 baseline in paired case bootstraps. The
+closest was probability-only (−0.0033; CI −0.0155 to +0.0084; p=0.579). Temperature 0.6 remained
+the strongest of the tested values.
+
+Ten baseline samples allowed rerun-count estimates over every seed subset rather than a single
+prefix:
+
+| Reruns averaged | Number of subsets | Mean subset AUC | SD across subsets |
+|---:|---:|---:|---:|
+| 1 | 10 | 0.8920 | 0.0037 |
+| 2 | 45 | 0.8992 | 0.0038 |
+| 3 | 120 | 0.9016 | 0.0036 |
+| 5 | 252 | 0.9033 | 0.0031 |
+| 8 | 45 | 0.9043 | 0.0019 |
+| 10 | 1 | 0.9042 | — |
+
+Most of the gain occurred by five runs. Additional runs mainly reduced seed sensitivity. For ten
+runs, aggregation AUCs were: rank mean 0.9048, arithmetic probability mean 0.9042, trimmed mean
+0.9035, logit mean 0.9035, and median 0.8983.
+
+The independent-image-review prompt was extended to ten runs to test prompt diversity. A 20-call
+ensemble averaging ten baseline and ten image-review probabilities scored 0.9052, only +0.0010
+over ten baseline calls; the paired CI was −0.0044 to +0.0063 (p=0.697). Random seed-subset
+comparisons likewise showed essentially no diversity advantage at matched request budgets. The
+extra prompt is therefore not justified by the present evidence.
+
+All refinements were selected and evaluated on the same 58 labeled reports. Their absolute
+rankings and small differences need confirmation on untouched labels.
+
+## Logistic-regression feature ablation
+
+The initial per-condition stack used, for the target being predicted, all prompt variants'
+probability estimates, confidence estimates, categorical evidence statuses, probability and
+confidence standard deviations across three LLM samples, and status agreement. The following
+ablation uses the same class-balanced L2 logistic regression (`C=0.10`) and the same 10× repeated
+5-fold splits for every row of the table.
+
+| Inputs to the per-target model | Mean held-out-fold macro AUC | Pooled OOF macro AUC |
+|---|---:|---:|
+| Recommended LLM probability, no fitted classifier | **0.9074** | **0.9088** |
+| Logistic regression: recommended probability only | 0.9074 | 0.8598 |
+| Logistic regression: probabilities from all prompt variants | 0.9043 | 0.8484 |
+| All probabilities + evidence status | 0.9033 | 0.8457 |
+| All probabilities + confidence | 0.8743 | 0.8477 |
+| All probabilities + confidence + evidence status | 0.8779 | 0.8484 |
+| Full feature set, also including sampling disagreement | 0.8511 | 0.8320 |
+
+The mean held-out-fold AUC is the cleaner feature-impact comparison. A logistic transform of the
+single probability preserves essentially the same ranking within each held-out fold (0.9074 vs
+0.9074). Combining probabilities from the weaker prompt variants did not help. Evidence status
+was nearly neutral, while reported confidence reduced mean held-out-fold AUC by about 0.030.
+Adding sample-disagreement features reduced it further. On these 58 cases, the extra features
+mostly duplicate the probability or give the classifier opportunities to overfit.
+
+The lower pooled OOF AUCs for fitted models require care: each fold has a separately trained
+calibrator, so its output scale differs, and pooling those fold-specific probabilities can disturb
+global ranking even when within-fold ranking is unchanged. The conclusion is consistent under
+either view—use the averaged raw LLM probability and do not fit a metadata stacker here.
 
 ## Per-target AUC for the recommended predictor
 
@@ -119,8 +207,18 @@ parser separated fields correctly, Qwen degenerated into repetition/whitespace a
 - `artifacts/all_predictions.csv`: labels plus every evaluated prediction.
 - `artifacts/metrics_macro.csv` and `metrics_by_label.csv`: aggregate and per-target AUCs.
 - `artifacts/paired_bootstrap_tests.csv`: paired differences, intervals, and p-values.
+- `artifacts/logistic_feature_ablation.csv`: per-label and macro held-out-fold AUCs for the
+  probability/confidence/status ablations.
 - `artifacts/sampling_variability.csv`: stochastic-run variation.
 - `artifacts/runtime_summary.csv`: request latency and token totals.
 - `artifacts/raw/*.jsonl`: resumable raw responses, seeds, usage, and reasoning traces.
 - `artifacts/raw/*partial.jsonl`: deliberately preserved diagnostics from interrupted/truncated
   reasoning designs; these are not used by the active evaluation.
+- `artifacts/refinement/config_metrics.csv`: five-run prompt and temperature comparisons.
+- `artifacts/refinement/rerun_count_summary.csv`: seed-subset results by ensemble size.
+- `artifacts/refinement/aggregation_methods.csv`: mean, median, trimmed, logit, and rank averaging.
+- `artifacts/refinement/prompt_diversity_by_budget.csv` and `extended_prompt_ensembles.csv`:
+  matched-budget prompt-diversity results and paired intervals.
+- `artifacts/refinement/candidate_predictions.csv`: directly usable five-run, ten-run,
+  probability-only, rank-averaged, and mixed-prompt candidate scores.
+- `artifacts/refinement/runtime_summary.csv`: latency and completion-token costs by configuration.

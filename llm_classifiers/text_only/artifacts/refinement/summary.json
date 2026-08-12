@@ -1,0 +1,84 @@
+{
+  "primary_comparison_samples": 5,
+  "best_config": {
+    "config": "baseline_t06",
+    "samples": 5,
+    "macro_auc": 0.9039435656894336,
+    "available_repeats": 10,
+    "bootstrap_ci_low": 0.871775122039278,
+    "bootstrap_ci_high": 0.9311882059644873
+  },
+  "baseline_available_repeats": 10,
+  "configs": [
+    {
+      "config": "baseline_t06",
+      "samples": 5,
+      "macro_auc": 0.9039435656894336,
+      "available_repeats": 10,
+      "bootstrap_ci_low": 0.871775122039278,
+      "bootstrap_ci_high": 0.9311882059644873
+    },
+    {
+      "config": "probability_only_t06",
+      "samples": 5,
+      "macro_auc": 0.9006814727287612,
+      "available_repeats": 5,
+      "bootstrap_ci_low": 0.8659489602382043,
+      "bootstrap_ci_high": 0.9297957542459568
+    },
+    {
+      "config": "image_reviewer_t06",
+      "samples": 5,
+      "macro_auc": 0.8990719777810724,
+      "available_repeats": 10,
+      "bootstrap_ci_low": 0.8643994629976944,
+      "bootstrap_ci_high": 0.9287967046224324
+    },
+    {
+      "config": "decomposed_t06",
+      "samples": 5,
+      "macro_auc": 0.8979355830530406,
+      "available_repeats": 5,
+      "bootstrap_ci_low": 0.8626518101751429,
+      "bootstrap_ci_high": 0.9282110375845732
+    },
+    {
+      "config": "skeptical_t06",
+      "samples": 5,
+      "macro_auc": 0.8965579208879947,
+      "available_repeats": 5,
+      "bootstrap_ci_low": 0.8642424262134671,
+      "bootstrap_ci_high": 0.9254301260496166
+    },
+    {
+      "config": "baseline_t02",
+      "samples": 5,
+      "macro_auc": 0.8964976029452458,
+      "available_repeats": 5,
+      "bootstrap_ci_low": 0.8634025062130898,
+      "bootstrap_ci_high": 0.9249100664031894
+    },
+    {
+      "config": "baseline_t10",
+      "samples": 5,
+      "macro_auc": 0.896017294619546,
+      "available_repeats": 5,
+      "bootstrap_ci_low": 0.86021983637338,
+      "bootstrap_ci_high": 0.9260249142535557
+    }
+  ],
+  "extended": {
+    "best_extended_candidate": {
+      "candidate": "mixed_mean_20",
+      "macro_auc": 0.9051514816960062,
+      "difference_vs_baseline_mean_10": 0.000973592878213414,
+      "difference_ci_low": -0.004432222747836795,
+      "difference_ci_high": 0.0063336927370535746,
+      "two_sided_p_value": 0.6968
+    },
+    "recommended_cost_performance": "baseline_mean_5",
+    "recommended_max_stability": "baseline_mean_10",
+    "batch_ranking_option": "baseline_rank_10"
+  },
+  "caveat": "Exploratory selection on the same 58 labeled cases."
+}

@@ -71,18 +71,25 @@ def repeated_oof_predict(
     y: np.ndarray,
     estimator_factory: Callable[[], object],
     repeats: int = 20,
-) -> np.ndarray:
+    return_fold_aucs: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     total = np.zeros(len(y), dtype=float)
     counts = np.zeros(len(y), dtype=int)
+    fold_aucs = []
     for train, test in make_splits(y, repeats):
         estimator = estimator_factory()
         estimator.fit(X.iloc[train] if hasattr(X, "iloc") else X[train], y[train])
         Xt = X.iloc[test] if hasattr(X, "iloc") else X[test]
-        total[test] += estimator.predict_proba(Xt)[:, 1]
+        fold_prediction = estimator.predict_proba(Xt)[:, 1]
+        total[test] += fold_prediction
         counts[test] += 1
+        fold_aucs.append(roc_auc_score(y[test], fold_prediction))
     if not np.all(counts == repeats):
         raise AssertionError((counts.min(), counts.max(), repeats))
-    return total / counts
+    prediction = total / counts
+    if return_fold_aucs:
+        return prediction, np.asarray(fold_aucs)
+    return prediction
 
 
 def condition_features(features: pd.DataFrame, label: str) -> pd.DataFrame:
@@ -120,16 +127,18 @@ def stacker_factory(X: pd.DataFrame) -> Callable[[], Pipeline]:
     numeric = [c for c in X.columns if c not in categorical]
 
     def make() -> Pipeline:
-        pre = ColumnTransformer(
-            [
-                ("numeric", StandardScaler(), numeric),
+        transformers = []
+        if numeric:
+            transformers.append(("numeric", StandardScaler(), numeric))
+        if categorical:
+            transformers.append(
                 (
                     "status",
                     OneHotEncoder(handle_unknown="ignore", drop=None),
                     categorical,
-                ),
-            ]
-        )
+                )
+            )
+        pre = ColumnTransformer(transformers)
         return Pipeline(
             [
                 ("pre", pre),
@@ -147,6 +156,52 @@ def stacker_factory(X: pd.DataFrame) -> Callable[[], Pipeline]:
         )
 
     return make
+
+
+def condition_ablation_features(
+    features: pd.DataFrame, label: str, repeats: int = 3
+) -> dict[str, pd.DataFrame]:
+    """Build matched feature subsets from the same first three LLM samples."""
+    probability: dict[str, pd.Series] = {}
+    confidence: dict[str, pd.Series] = {}
+    status: dict[str, pd.Series] = {}
+    disagreement: dict[str, pd.Series] = {}
+    for experiment in EXPERIMENTS:
+        p = features[
+            [f"{experiment}__{label}__probability_r{r}" for r in range(repeats)]
+        ]
+        c = features[
+            [f"{experiment}__{label}__confidence_r{r}" for r in range(repeats)]
+        ]
+        s = features[
+            [f"{experiment}__{label}__status_r{r}" for r in range(repeats)]
+        ]
+        probability[f"{experiment}__probability"] = p.mean(axis=1)
+        confidence[f"{experiment}__confidence"] = c.mean(axis=1)
+        status[f"{experiment}__status"] = s.mode(axis=1).iloc[:, 0]
+        disagreement[f"{experiment}__probability_std"] = p.std(axis=1, ddof=0)
+        disagreement[f"{experiment}__confidence_std"] = c.std(axis=1, ddof=0)
+        disagreement[f"{experiment}__status_agreement"] = s.apply(
+            lambda row: row.value_counts().iloc[0] / repeats, axis=1
+        )
+
+    pframe = pd.DataFrame(probability)
+    cframe = pd.DataFrame(confidence)
+    sframe = pd.DataFrame(status)
+    dframe = pd.DataFrame(disagreement)
+    best_probability = pframe[["joint_latent__probability"]].copy()
+    return {
+        "oof_lr_best_probability": best_probability,
+        "oof_lr_all_probabilities": pframe,
+        "oof_lr_prob_confidence": pd.concat([pframe, cframe], axis=1),
+        "oof_lr_prob_status": pd.concat([pframe, sframe], axis=1),
+        "oof_lr_prob_conf_status": pd.concat(
+            [pframe, cframe, sframe], axis=1
+        ),
+        "oof_per_condition_stack": pd.concat(
+            [pframe, cframe, sframe, dframe], axis=1
+        ),
+    }
 
 
 def text_factory() -> Pipeline:
@@ -347,16 +402,56 @@ def main() -> None:
 
     # Repeated out-of-fold learned models. Every prediction for a row comes from models
     # that did not train on that row. Fixed regularization avoids meta-overfitting here.
-    per_condition_stack = pd.DataFrame(index=features.index)
+    ablation_names = [
+        "oof_lr_best_probability",
+        "oof_lr_all_probabilities",
+        "oof_lr_prob_confidence",
+        "oof_lr_prob_status",
+        "oof_lr_prob_conf_status",
+        "oof_per_condition_stack",
+    ]
+    ablation_predictions = {
+        name: pd.DataFrame(index=features.index) for name in ablation_names
+    }
+    ablation_fold_aucs: dict[str, dict[str, np.ndarray]] = {
+        "raw_best_probability": {},
+        **{name: {} for name in ablation_names},
+    }
     cross_condition_stack = pd.DataFrame(index=features.index)
     text_baseline = pd.DataFrame(index=features.index)
-    all_X = all_condition_features(features)
+    condition_feature_sets = {
+        label: condition_ablation_features(features, label) for label in LABELS
+    }
+    all_X = pd.concat(
+        {
+            label: condition_feature_sets[label]["oof_per_condition_stack"]
+            for label in LABELS
+        },
+        axis=1,
+    )
+    all_X.columns = ["__".join(column) for column in all_X.columns]
     for label in LABELS:
         yy = y[label].to_numpy()
-        Xi = condition_features(features, label)
-        per_condition_stack[label] = repeated_oof_predict(
-            Xi, yy, stacker_factory(Xi), repeats=10
+        raw_probability = condition_feature_sets[label][
+            "oof_lr_best_probability"
+        ].iloc[:, 0].to_numpy()
+        ablation_fold_aucs["raw_best_probability"][label] = np.asarray(
+            [
+                roc_auc_score(yy[test], raw_probability[test])
+                for _, test in make_splits(yy, repeats=10)
+            ]
         )
+        for name in ablation_names:
+            Xi = condition_feature_sets[label][name]
+            prediction, fold_aucs = repeated_oof_predict(
+                Xi,
+                yy,
+                stacker_factory(Xi),
+                repeats=10,
+                return_fold_aucs=True,
+            )
+            ablation_predictions[name][label] = prediction
+            ablation_fold_aucs[name][label] = fold_aucs
         cross_condition_stack[label] = repeated_oof_predict(
             all_X, yy, stacker_factory(all_X), repeats=10
         )
@@ -365,13 +460,43 @@ def main() -> None:
         )
         print(f"OOF complete: {label}", flush=True)
 
-    for name, pred in {
-        "oof_per_condition_stack": per_condition_stack,
+    learned_predictions = {
+        **ablation_predictions,
         "oof_cross_condition_stack": cross_condition_stack,
         "oof_hashed_text": text_baseline,
-    }.items():
+    }
+    for name, pred in learned_predictions.items():
         prediction_sets[name] = pred
         all_metrics += aucs(y, pred, name)
+
+    ablation_rows = []
+    for method, label_scores in ablation_fold_aucs.items():
+        for label in LABELS:
+            values = label_scores[label]
+            ablation_rows.append(
+                {
+                    "method": method,
+                    "label": label,
+                    "mean_heldout_fold_auc": float(np.mean(values)),
+                    "std_heldout_fold_auc": float(np.std(values, ddof=1)),
+                    "heldout_folds": len(values),
+                }
+            )
+        macro_values = np.mean(
+            np.column_stack([label_scores[label] for label in LABELS]), axis=1
+        )
+        ablation_rows.append(
+            {
+                "method": method,
+                "label": "MACRO",
+                "mean_heldout_fold_auc": float(np.mean(macro_values)),
+                "std_heldout_fold_auc": float(np.std(macro_values, ddof=1)),
+                "heldout_folds": len(macro_values),
+            }
+        )
+    pd.DataFrame(ablation_rows).to_csv(
+        artifacts / "logistic_feature_ablation.csv", index=False
+    )
 
     metrics = pd.DataFrame(all_metrics)
     metrics.to_csv(artifacts / "metrics_by_label.csv", index=False)
@@ -397,6 +522,11 @@ def main() -> None:
         ("two_stage_reasoning", "joint_latent"),
         ("two_stage_reasoning", "joint_latent_first3_average"),
         ("rank_ensemble_all", "joint_latent"),
+        ("oof_lr_all_probabilities", "oof_lr_best_probability"),
+        ("oof_lr_prob_confidence", "oof_lr_all_probabilities"),
+        ("oof_lr_prob_status", "oof_lr_all_probabilities"),
+        ("oof_lr_prob_conf_status", "oof_lr_all_probabilities"),
+        ("oof_per_condition_stack", "oof_lr_prob_conf_status"),
         ("oof_per_condition_stack", "rank_ensemble_all"),
         ("oof_cross_condition_stack", "oof_per_condition_stack"),
     ]

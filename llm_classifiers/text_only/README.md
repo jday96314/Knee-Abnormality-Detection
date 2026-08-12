@@ -76,6 +76,12 @@ The script never reads label columns, so its default invocation includes all 4,3
 as well as the 58 labeled reports in `train.csv`. `--samples 10 --concurrency 6` can be used for
 maximum tested stability, at approximately twice the inference cost; five samples captured most of
 the measured benefit.
+
+The generated local artifact contains all 4,407 input rows and 22,035 unique cached samples (five
+per report), with exact source UID/order agreement and no missing or out-of-range probabilities.
+This particular stochastic ensemble scored 0.8980 macro ROC AUC on the 58 labeled rows. The CSV and
+JSONL prediction artifacts are intentionally excluded by the workspace-root `.gitignore`.
+
 Pre-specified method contrasts use paired case-level bootstrap tests of macro ROC AUC, while a
 separate table reports sampling variation across LLM reruns.
 

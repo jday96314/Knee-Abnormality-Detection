@@ -1,22 +1,22 @@
 {
-  "cohort": "n15_f0e19bdfc8",
-  "n_studies": 15,
+  "cohort": "n58_7f8220fe8f",
+  "n_studies": 58,
   "positives": {
-    "ACL": 6,
-    "MCL": 3,
-    "Medial Meniscus": 7,
-    "Lateral Meniscus": 6,
-    "Medial OA": 4,
-    "Lateral OA": 4,
-    "PF OA": 5,
-    "Effusion": 8,
-    "Synovitis": 6,
-    "Baker's": 5,
-    "Contusion": 5,
-    "Fracture": 4
+    "ACL": 24,
+    "MCL": 9,
+    "Medial Meniscus": 26,
+    "Lateral Meniscus": 23,
+    "Medial OA": 15,
+    "Lateral OA": 11,
+    "PF OA": 21,
+    "Effusion": 35,
+    "Synovitis": 27,
+    "Baker's": 12,
+    "Contusion": 19,
+    "Fracture": 18
   },
   "best_condition": "v2_digit",
-  "best_macro_auc": 0.74082531665865,
+  "best_macro_auc": 0.6594271574825558,
   "conditions_scored": [
     "ctx_128img_32k",
     "ctx_16img_4k",
@@ -80,5 +80,48 @@
     "v2_two_stage_t07_x5",
     "v2_words",
     "v2_words_targeted"
-  ]
+  ],
+  "ensemble": {
+    "members": [
+      "v2_digit",
+      "v2_two_stage_t07_x5"
+    ],
+    "macro_auc": 0.688876849858327,
+    "ci": [
+      0.6374647471334187,
+      0.7386907227420858
+    ],
+    "contrasts": {
+      "v2_digit": {
+        "difference": 0.02944969237577122,
+        "ci": [
+          0.004225490856541229,
+          0.056228543081023964
+        ],
+        "p": 0.0204
+      },
+      "v2_two_stage_t07_x5": {
+        "difference": 0.02970237503057238,
+        "ci": [
+          -0.0031437495158462884,
+          0.059632706103562236
+        ],
+        "p": 0.08
+      }
+    },
+    "per_label": {
+      "ACL": 0.6029411764705882,
+      "MCL": 0.4897959183673469,
+      "Medial Meniscus": 0.6189903846153846,
+      "Lateral Meniscus": 0.6888198757763975,
+      "Medial OA": 0.6984496124031008,
+      "Lateral OA": 0.7437137330754352,
+      "PF OA": 0.6068211068211068,
+      "Effusion": 0.906832298136646,
+      "Synovitis": 0.7287933094384708,
+      "Baker's": 0.6865942028985508,
+      "Contusion": 0.7031039136302294,
+      "Fracture": 0.7916666666666666
+    }
+  }
 }

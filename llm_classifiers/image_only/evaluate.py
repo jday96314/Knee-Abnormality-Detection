@@ -247,6 +247,67 @@ def paired_bootstrap(
     return observed, float(low), float(high), float(min(1.0, 2 * tail))
 
 
+def rank_scores(predictions: pd.DataFrame, labels_df: pd.DataFrame, condition: str) -> np.ndarray:
+    """Within-label percentile ranks, so unlike-scaled conditions can be averaged.
+
+    A digit-scale expectation and an averaged ordinal score do not live on the same
+    scale, and AUC only cares about order, so ranks are the right common currency.
+    """
+    truth, score, _ = score_matrix(predictions, labels_df, condition)
+    return np.apply_along_axis(
+        lambda column: pd.Series(column).rank(pct=True).to_numpy(), 0, score
+    )
+
+
+def report_ensemble(
+    predictions: pd.DataFrame,
+    labels_df: pd.DataFrame,
+    macro: pd.DataFrame,
+    members: list[str],
+) -> dict[str, Any] | None:
+    """Rank-average a small set of conditions and test it against its own members.
+
+    Combining helps here only because the leading conditions fail on *different*
+    findings, so this is reported alongside the per-label table rather than as a
+    headline on its own.
+    """
+    if len(members) < 2:
+        return None
+    truth, _, _ = score_matrix(predictions, labels_df, members[0])
+    ensemble = np.mean([rank_scores(predictions, labels_df, name) for name in members], axis=0)
+
+    observed = macro_auc(truth, ensemble)
+    draws = bootstrap_macro(truth, ensemble, np.random.default_rng(RNG_SEED))
+    draws = draws[~np.isnan(draws)]
+
+    print(f"\nrank-average ensemble of {', '.join(members)}")
+    print(
+        f"  macro AUC {observed:.4f} "
+        f"({np.percentile(draws, 2.5):.4f}-{np.percentile(draws, 97.5):.4f})"
+    )
+    contrasts = {}
+    for name in members:
+        difference, low, high, p_value = paired_bootstrap(
+            truth,
+            ensemble,
+            rank_scores(predictions, labels_df, name),
+            np.random.default_rng(RNG_SEED + 1),
+        )
+        contrasts[name] = {"difference": difference, "ci": [low, high], "p": p_value}
+        print(f"  vs {name:24s} {difference:+.4f}  CI {low:+.4f} to {high:+.4f}  p={p_value:.4f}")
+
+    return {
+        "members": members,
+        "macro_auc": observed,
+        "ci": [float(np.percentile(draws, 2.5)), float(np.percentile(draws, 97.5))],
+        "contrasts": contrasts,
+        "per_label": {
+            label: label_auc(truth[:, index], ensemble[:, index])
+            for index, label in enumerate(LABELS)
+        },
+    }
+
+
 def screen_conditions(macro: pd.DataFrame, args: argparse.Namespace) -> dict[str, Any]:
     """Decide which conditions are worth spending the full run's GPU time on.
 
@@ -343,6 +404,13 @@ def main() -> None:
         "--write-screen",
         action="store_true",
         help=f"write {SCREEN_FILENAME}, the condition list used by --sweep sane",
+    )
+    parser.add_argument(
+        "--ensemble-top",
+        type=int,
+        default=2,
+        help="rank-average this many of the best full-cohort conditions and report it "
+        "(0 disables)",
     )
     parser.add_argument("--screen-min-auc", type=float, default=0.6)
     parser.add_argument("--screen-min-yield", type=float, default=0.9)
@@ -566,6 +634,12 @@ def main() -> None:
         "best_macro_auc": float(best["macro_auc"]),
         "conditions_scored": conditions,
     }
+    if args.ensemble_top >= 2:
+        members = eligible["condition"].head(args.ensemble_top).tolist()
+        ensemble = report_ensemble(predictions, labels_df, macro, members)
+        if ensemble:
+            summary["ensemble"] = ensemble
+
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
     if args.write_screen:

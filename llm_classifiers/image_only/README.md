@@ -83,6 +83,18 @@ numbers of studies, so a pilot-only condition is never silently ranked against a
 `--list-conditions` prints the full grid. Every condition is a one-field change from the reference
 condition `ref_joint_definitions`, so contrasts are interpretable.
 
+**Round-two strategies** (`prompts_v2.py`) — added after round one showed the bottleneck was
+decoding and prompting rather than pixels:
+
+| Strategy | What it does |
+|---|---|
+| `binary_digit` | One request per finding: "rate 0–5 how confident you are", one token generated, score = expected value over the digit distribution in the logprobs. Continuous from a single greedy request, no parsing, cannot degenerate. **Best single condition.** |
+| `binary_words` | The same read on a five-word scale (`absent … certain`), which needs a string-enum schema — unconstrained, the model opens with a markdown `**` and the scale never reaches the answer position. |
+| `two_stage_questions` | A fixed 13-point structured read-out answered from the images, then scored as text. |
+| `fewshot_yesno` / `fewshot_digit` | Labelled example studies for the finding in question, drawn leave-one-out from the other 57 and shown in the plane that answers it. **Did not work** — 0.49 on the full cohort. |
+| `background=True` | Prepends context mined from the 4,349 *unlabeled* training reports: what readers of this collection comment on, how often, and how findings co-occur. Roughly neutral. |
+| `view_targeted=True` | Shows only the plane that can answer the finding (ACL sagittal, MCL coronal, Baker's axial) via `FINDING_PLAN`. |
+
 **Prompting strategy** (`prompts.py`)
 
 | Strategy | What it does |

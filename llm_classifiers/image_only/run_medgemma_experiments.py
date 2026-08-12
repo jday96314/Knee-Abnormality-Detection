@@ -46,6 +46,7 @@ import pandas as pd
 from openai import AsyncOpenAI
 
 from dicom_io import (
+    FINDING_PLAN,
     MAX_IMAGES_HARD_CAP,
     LABELS,
     TOKENS_PER_IMAGE,
@@ -67,6 +68,19 @@ from prompts import (
     binary_yesno,
     describe_prompt,
     score_reading_prompt,
+)
+from prompts_v2 import (
+    DIGIT_VALUES,
+    WORDS_LP_VALUES,
+    FEWSHOT_SYSTEM,
+    QUESTIONS_SYSTEM,
+    digit_scale_prompt,
+    fewshot_example_caption,
+    fewshot_intro,
+    fewshot_question,
+    questions_prompt,
+    score_answers_prompt,
+    words_prompt,
 )
 
 DEFAULT_BASE_URL = "http://mlserver2:8000/v1"
@@ -112,15 +126,37 @@ class Condition:
     image: ImageSpec = field(default_factory=ImageSpec)
     axis: str = "reference"
     max_tokens: int = 700
-    answer_format: str = "probability"  # or "percent_int", "likert"
+    answer_format: str = "probability"  # or "percent_int", "likert", "words5"
+    # Round-two options (see prompts_v2.py)
+    background: bool = False  # prepend report-derived background on what to look at
+    few_shot: int = 0  # labelled examples per class, drawn from other studies
+    view_targeted: bool = False  # show only the plane that can answer this finding
+
+    # Strategies scored from the first generated token's logprob distribution. These
+    # cannot degenerate to a constant and need no output parsing, and unlike a 5- or
+    # 7-level word scale they yield a continuous score from a single request.
+    LOGPROB_STRATEGIES = {
+        "binary_logprob",
+        "binary_digit",
+        "binary_words",
+        "fewshot_yesno",
+        "fewshot_digit",
+    }
+    PER_LABEL_EXTRA = {
+        "binary_digit",
+        "binary_words",
+        "binary_words5_guided",
+        "fewshot_yesno",
+        "fewshot_digit",
+    }
 
     @property
     def per_label(self) -> bool:
-        return self.strategy in PER_LABEL_STRATEGIES
+        return self.strategy in PER_LABEL_STRATEGIES or self.strategy in self.PER_LABEL_EXTRA
 
     @property
     def uses_logprobs(self) -> bool:
-        return self.strategy == "binary_logprob"
+        return self.strategy in self.LOGPROB_STRATEGIES
 
 
 REFERENCE = Condition(
@@ -259,6 +295,91 @@ def build_conditions() -> dict[str, Condition]:
             )
         )
 
+    # =====================================================================
+    # Round two. The first sweep showed the bottleneck is decoding/prompting,
+    # not pixels, so these push on what to look for and how to answer.
+    # =====================================================================
+
+    # --- v2a: guidance about what to look at ---
+    # `background` prepends context mined from the 4,349 *unlabeled* training reports:
+    # what readers of this collection habitually comment on and how findings co-occur.
+    # `two_stage_questions` makes the model answer a fixed 13-point structured read-out
+    # before any score exists, which is a stronger commitment than free-text description.
+    conditions += [
+        replace(REFERENCE, name="v2_questions", strategy="two_stage_questions",
+                axis="v2_guidance", max_tokens=1600),
+        replace(REFERENCE, name="v2_questions_background", strategy="two_stage_questions",
+                background=True, axis="v2_guidance", max_tokens=1600),
+        replace(REFERENCE, name="v2_questions_words", strategy="two_stage_questions",
+                answer_format="words5", axis="v2_guidance", max_tokens=1600),
+        replace(REFERENCE, name="v2_questions_bg_words", strategy="two_stage_questions",
+                background=True, answer_format="words5", axis="v2_guidance",
+                max_tokens=1600),
+        replace(REFERENCE, name="v2_two_stage_background", strategy="two_stage",
+                background=True, answer_format="likert", axis="v2_guidance",
+                max_tokens=1400),
+    ]
+
+    # --- v2b: verbal answers scored from the logprob distribution ---
+    # A parsed word scale gives 5 tied levels; reading the constrained distribution
+    # over those words instead gives a continuous score from one greedy request.
+    conditions += [
+        replace(REFERENCE, name="v2_digit", strategy="binary_digit",
+                answer_format="digit", axis="v2_verbal", max_tokens=1),
+        replace(REFERENCE, name="v2_digit_background", strategy="binary_digit",
+                answer_format="digit", background=True, axis="v2_verbal", max_tokens=1),
+        replace(REFERENCE, name="v2_digit_targeted", strategy="binary_digit",
+                answer_format="digit", view_targeted=True, axis="v2_verbal", max_tokens=1),
+        replace(REFERENCE, name="v2_words", strategy="binary_words",
+                answer_format="words_lp", axis="v2_verbal", max_tokens=4),
+        replace(REFERENCE, name="v2_words_targeted", strategy="binary_words",
+                answer_format="words_lp", view_targeted=True, axis="v2_verbal",
+                max_tokens=4),
+    ]
+
+    # --- v2c: the condition the first screen rejected on yield, revisited ---
+    conditions.append(
+        replace(REFERENCE, name="v2_guided_off_two_stage", strategy="two_stage",
+                guided=False, axis="v2_revisit", max_tokens=2500)
+    )
+
+    # --- v2d: averaging several nonzero-temperature samples ---
+    # Sampling was the other thing that broke the constant-output failure. Averaging
+    # also breaks ties, which is what limits a coarse word scale's AUC.
+    conditions += [
+        replace(REFERENCE, name="v2_two_stage_t07_x5", strategy="two_stage",
+                answer_format="likert", temperature=0.7, top_p=0.95, samples=5,
+                axis="v2_average", max_tokens=1400),
+        replace(REFERENCE, name="v2_questions_t07_x5", strategy="two_stage_questions",
+                answer_format="words5", temperature=0.7, top_p=0.95, samples=5,
+                axis="v2_average", max_tokens=1600),
+        replace(REFERENCE, name="v2_digit_t07_x5", strategy="binary_digit",
+                answer_format="digit", temperature=0.7, top_p=0.95, samples=5,
+                axis="v2_average", max_tokens=1),
+        replace(REFERENCE, name="v2_likert_t07_x5", strategy="joint_definitions",
+                answer_format="likert", temperature=0.7, top_p=0.95, samples=5,
+                axis="v2_average"),
+    ]
+
+    # --- v2e: few-shot, per finding, leave-one-out ---
+    # Examples are drawn from the other 57 labelled studies, balanced, shuffled, and
+    # shown in the plane that can actually answer the finding to keep tokens sane.
+    fewshot_spec = ImageSpec(slices_per_series=3, max_images=12)
+    conditions += [
+        replace(REFERENCE, name="v2_fewshot1_yesno", strategy="fewshot_yesno",
+                few_shot=1, view_targeted=True, image=fewshot_spec,
+                axis="v2_fewshot", max_tokens=1),
+        replace(REFERENCE, name="v2_fewshot2_yesno", strategy="fewshot_yesno",
+                few_shot=2, view_targeted=True, image=fewshot_spec,
+                axis="v2_fewshot", max_tokens=1),
+        replace(REFERENCE, name="v2_fewshot2_digit", strategy="fewshot_digit",
+                few_shot=2, view_targeted=True, image=fewshot_spec,
+                answer_format="digit", axis="v2_fewshot", max_tokens=1),
+        replace(REFERENCE, name="v2_fewshot2_digit_bg", strategy="fewshot_digit",
+                few_shot=2, view_targeted=True, image=fewshot_spec, background=True,
+                answer_format="digit", axis="v2_fewshot", max_tokens=1),
+    ]
+
     return {condition.name: condition for condition in conditions}
 
 
@@ -273,6 +394,11 @@ SWEEPS = {
     "image": [n for n, c in CONDITIONS.items() if c.axis in ("reference", "image")],
     "downsample": [n for n, c in CONDITIONS.items() if c.axis in ("reference", "downsample")],
     "context": [n for n, c in CONDITIONS.items() if c.axis in ("reference", "context")],
+    "v2": [n for n, c in CONDITIONS.items() if c.axis.startswith("v2")],
+    "v2_guidance": [n for n, c in CONDITIONS.items() if c.axis == "v2_guidance"],
+    "v2_verbal": [n for n, c in CONDITIONS.items() if c.axis == "v2_verbal"],
+    "v2_average": [n for n, c in CONDITIONS.items() if c.axis == "v2_average"],
+    "v2_fewshot": [n for n, c in CONDITIONS.items() if c.axis == "v2_fewshot"],
     "all": list(CONDITIONS),
 }
 
@@ -464,20 +590,61 @@ def parse_joint(payload: dict[str, Any]) -> dict[str, float]:
     return resolved
 
 
-def yes_probability(top_logprobs: list[Any]) -> float:
-    """P(yes) / (P(yes) + P(no)) over the first generated token's alternatives."""
-    yes = no = 0.0
+def _scale_mass(top_logprobs: list[Any], values: dict[str, float]) -> dict[str, float]:
+    """Probability mass on each scale option at one token position."""
+    weight: dict[str, float] = {}
     for entry in top_logprobs:
         token = entry.token.strip().lower().strip('"*')
-        probability = math.exp(entry.logprob)
-        if token.startswith("yes"):
-            yes += probability
-        elif token.startswith("no"):
-            no += probability
-    total = yes + no
-    if total <= 0.0:
-        raise ValueError("neither yes nor no appeared in the top logprobs")
-    return yes / total
+        if not token:
+            continue
+        for key in values:
+            # The scale word may be split across tokens ("abs" for "absent"), so a
+            # token counts as a match when either string prefixes the other. The
+            # length guard stops a bare "a" from claiming "absent".
+            if len(token) >= min(2, len(key)) and (
+                token.startswith(key) or key.startswith(token)
+            ):
+                weight[key] = weight.get(key, 0.0) + math.exp(entry.logprob)
+                break
+    return weight
+
+
+def scale_expectation(logprob_content: list[Any], values: dict[str, float]) -> float:
+    """Expected score over an ordinal scale, read from the answer's logprobs.
+
+    Gives a genuinely continuous score from a single greedy request — no sampling, no
+    output parsing, and no way to collapse onto a constant. Unlike a parsed 5- or
+    7-level word answer it is not restricted to a handful of tied values.
+
+    The scale token is not always first: under a string-enum schema the model must
+    open with a quote, so the constrained distribution lands one position later. The
+    first position carrying real mass on the scale is the one that answers.
+    """
+    for position in logprob_content[:4]:
+        weight = _scale_mass(position.top_logprobs, values)
+        total = sum(weight.values())
+        if total >= 0.5:
+            return sum(values[key] * mass for key, mass in weight.items()) / total
+
+    seen = [entry.token for entry in logprob_content[0].top_logprobs[:6]]
+    raise ValueError(f"no scale token found in logprobs; first position offered {seen}")
+
+
+def yes_probability(logprob_content: list[Any]) -> float:
+    """P(yes) / (P(yes) + P(no)) over the answer token's alternatives."""
+    return scale_expectation(logprob_content, {"no": 0.0, "yes": 1.0})
+
+
+YESNO_VALUES = {"no": 0.0, "yes": 1.0}
+
+
+def scale_values(condition: "Condition") -> dict[str, float]:
+    """The answer options a logprob-scored condition is renormalised over."""
+    if condition.answer_format == "digit":
+        return DIGIT_VALUES
+    if condition.answer_format in ("words5", "words_lp"):
+        return WORDS_LP_VALUES
+    return YESNO_VALUES
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +678,7 @@ class Runner:
         cohort: str,
         concurrency: int,
         max_retries: int,
+        labels: pd.DataFrame | None = None,
     ) -> None:
         self.client = client
         self.model = model
@@ -518,12 +686,48 @@ class Runner:
         self.series = series
         self.out_dir = out_dir
         self.cohort = cohort
+        # Only ever read by few-shot conditions, and only for studies other than the
+        # one being scored.
+        self.labels = labels
         self.semaphore = asyncio.Semaphore(concurrency)
         self.max_retries = max_retries
         self.write_lock = asyncio.Lock()
         self._image_cache: dict[tuple[str, str], list[tuple[str, str]]] = {}
         self._image_lock = asyncio.Lock()
         self._reading_cache: dict[tuple[str, str], str] = {}
+
+    def spec_for(self, condition: Condition, label: str) -> ImageSpec:
+        """The image spec for one request, narrowed to the plane that answers `label`."""
+        if condition.view_targeted and label in FINDING_PLAN:
+            return replace(condition.image, plan=FINDING_PLAN[label])
+        return condition.image
+
+    def select_examples(
+        self, uid: str, label: str, condition: Condition
+    ) -> list[tuple[str, bool]]:
+        """Balanced labelled examples for `label`, drawn from studies other than `uid`.
+
+        This is the one place labels enter a prompt, and they are always another
+        patient's. The study being scored is excluded, so the protocol is
+        leave-one-out rather than leakage — but note the resulting numbers describe
+        few-shot performance *given* a labelled pool, not zero-shot performance.
+        """
+        if self.labels is None:
+            raise ValueError("few-shot conditions need the label table")
+        pool = self.labels[self.labels["StudyInstanceUID"] != uid]
+        rng = np.random.default_rng(seed_for(f"examples|{condition.name}|{uid}|{label}"))
+
+        chosen: list[tuple[str, bool]] = []
+        for present in (True, False):
+            side = pool[pool[label] == (1 if present else 0)]["StudyInstanceUID"].tolist()
+            if len(side) < condition.few_shot:
+                raise ValueError(f"not enough {'positive' if present else 'negative'} examples for {label}")
+            picks = rng.choice(len(side), size=condition.few_shot, replace=False)
+            chosen += [(side[int(i)], present) for i in picks]
+
+        # Interleave so the model cannot infer the answer from position alone.
+        order = rng.permutation(len(chosen))
+        return [chosen[int(i)] for i in order]
 
     async def images_for(self, uid: str, spec: ImageSpec) -> list[tuple[str, str]]:
         key = (uid, spec.key())
@@ -568,17 +772,128 @@ class Runner:
             raise ValueError("describe stage returned no text")
         return reading, completion.usage
 
+    async def read_out(self, uid: str, condition: Condition, seed: int) -> tuple[str, Any]:
+        """Stage one of `two_stage_questions`: answers to a fixed structured read-out."""
+        images = await self.images_for(uid, condition.image)
+        captions = [caption for caption, _ in images]
+        completion = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": QUESTIONS_SYSTEM},
+                {
+                    "role": "user",
+                    "content": image_content(images)
+                    + [
+                        {
+                            "type": "text",
+                            "text": questions_prompt(captions, condition.background),
+                        }
+                    ],
+                },
+            ],
+            temperature=condition.temperature,
+            top_p=condition.top_p,
+            seed=seed,
+            max_tokens=1600,
+        )
+        answers = strip_thinking(completion.choices[0].message.content or "")
+        if not answers:
+            raise ValueError("question stage returned no text")
+        return answers, completion.usage
+
+    async def fewshot_messages(
+        self, condition: Condition, job: Job
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Labelled examples for this finding, then the study under test."""
+        spec = self.spec_for(condition, job.label)
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": fewshot_intro(job.label, condition.few_shot, condition.background),
+            }
+        ]
+        total_images = 0
+        for index, (example_uid, present) in enumerate(
+            self.select_examples(job.uid, job.label, condition), start=1
+        ):
+            example_images = await self.images_for(example_uid, spec)
+            content += image_content(example_images)
+            content.append(
+                {
+                    "type": "text",
+                    "text": fewshot_example_caption(index, present, len(example_images)),
+                }
+            )
+            total_images += len(example_images)
+
+        test_images = await self.images_for(job.uid, spec)
+        content += image_content(test_images)
+        total_images += len(test_images)
+        scale = {"digit": "digit", "words5": "words5"}.get(condition.answer_format, "yesno")
+        content.append({"type": "text", "text": fewshot_question(job.label, scale)})
+        return [
+            {"role": "system", "content": FEWSHOT_SYSTEM},
+            {"role": "user", "content": content},
+        ], total_images
+
     async def run_one(self, condition: Condition, job: Job) -> dict[str, Any]:
         seed = seed_for(f"{condition.name}|{job.uid}|{job.label}|{job.repeat}")
-        images = await self.images_for(job.uid, condition.image)
+        spec = self.spec_for(condition, job.label)
+        images = await self.images_for(job.uid, spec)
         captions = [caption for caption, _ in images]
+        n_images = len(images)
         started = time.perf_counter()
         reading = None
         stage_one_usage = None
 
         scale = answer_scale_instruction(condition.answer_format)
 
-        if condition.strategy == "two_stage":
+        if condition.strategy.startswith("fewshot"):
+            messages, n_images = await self.fewshot_messages(condition, job)
+            schema = single_schema(condition.answer_format)
+        elif condition.strategy == "two_stage_questions":
+            reading, stage_one_usage = await self.read_out(job.uid, condition, seed)
+            messages = [
+                {"role": "system", "content": SYSTEM_BASE},
+                {
+                    "role": "user",
+                    "content": score_answers_prompt(reading, condition.answer_format),
+                },
+            ]
+            schema = joint_schema(condition.answer_format)
+        elif condition.strategy == "binary_digit":
+            messages = [
+                {"role": "system", "content": SYSTEM_TERSE},
+                {
+                    "role": "user",
+                    "content": image_content(images)
+                    + [
+                        {
+                            "type": "text",
+                            "text": digit_scale_prompt(
+                                captions, job.label, condition.background
+                            ),
+                        }
+                    ],
+                },
+            ]
+            schema = single_schema(condition.answer_format)
+        elif condition.strategy == "binary_words":
+            messages = [
+                {"role": "system", "content": SYSTEM_TERSE},
+                {
+                    "role": "user",
+                    "content": image_content(images)
+                    + [
+                        {
+                            "type": "text",
+                            "text": words_prompt(captions, job.label, condition.background),
+                        }
+                    ],
+                },
+            ]
+            schema = single_schema(condition.answer_format)
+        elif condition.strategy == "two_stage":
             reading, stage_one_usage = await self.describe(job.uid, condition, seed)
             messages = [
                 {"role": "system", "content": SYSTEM_BASE},
@@ -625,6 +940,13 @@ class Runner:
         }
         if condition.uses_logprobs:
             request.update(logprobs=True, top_logprobs=20)
+            # A word scale needs constraining or the model opens with markdown "**"
+            # and the scale never appears in the answer position. Digits and yes/no
+            # are reliable unconstrained.
+            if condition.answer_format in ("words5", "words_lp"):
+                request["response_format"] = response_format(
+                    condition.name, {"type": "string", "enum": list(scale_values(condition))}
+                )
         elif condition.guided:
             request["response_format"] = response_format(condition.name, schema)
 
@@ -634,10 +956,11 @@ class Runner:
 
         try:
             if condition.uses_logprobs:
-                top = choice.logprobs.content[0].top_logprobs
-                result = {job.label: yes_probability(top)}
+                positions = choice.logprobs.content
+                result = {job.label: scale_expectation(positions, scale_values(condition))}
                 raw_alternatives = [
-                    {"token": entry.token, "logprob": entry.logprob} for entry in top
+                    {"token": entry.token, "logprob": entry.logprob}
+                    for entry in positions[0].top_logprobs
                 ]
             else:
                 payload = extract_payload(content)
@@ -662,12 +985,12 @@ class Runner:
         return {
             "condition": condition.name,
             "cohort": self.cohort,
-            "image_spec": condition.image.key(),
+            "image_spec": spec.key(),
             "uid": job.uid,
             "label": job.label,
             "repeat": job.repeat,
             "seed": seed,
-            "n_images": len(images),
+            "n_images": n_images,
             "ok": True,
             "elapsed_seconds": time.perf_counter() - started,
             "finish_reason": choice.finish_reason,
@@ -825,11 +1148,17 @@ async def main_async(args: argparse.Namespace) -> None:
 
     labeled, series = complete_labeled_studies(data_dir)
     available = len(labeled)
+    # Few-shot examples are drawn from every labelled study except the one under test,
+    # not merely from the scored cohort. A screening pilot would otherwise have a pool
+    # of 14, which is a different — and much weaker — few-shot setting than the one the
+    # full run would use.
+    example_pool = labeled.copy()
     if args.limit_studies:
         labeled = labeled.head(args.limit_studies)
     if args.pilot_studies:
         labeled = pilot_subset(labeled, args.pilot_studies)
-    series = series[series["StudyInstanceUID"].isin(labeled["StudyInstanceUID"])]
+    # Deliberately not narrowed to the scored cohort: few-shot examples come from
+    # outside it, and every lookup selects by study UID anyway.
     uids = labeled["StudyInstanceUID"].tolist()
     cohort = cohort_id(uids)
 
@@ -881,6 +1210,7 @@ async def main_async(args: argparse.Namespace) -> None:
         cohort=cohort,
         concurrency=args.concurrency,
         max_retries=args.max_retries,
+        labels=example_pool,
     )
 
     manifest = {

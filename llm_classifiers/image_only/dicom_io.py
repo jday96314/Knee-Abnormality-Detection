@@ -133,6 +133,35 @@ SERIES_PLANS: dict[str, list[tuple[str, str, int | None]]] = {
         ("coronal_any", "Coronal", None),
         ("axial_any", "Axial", None),
     ],
+    "cor_fluid": [("coronal_fluid", "Coronal", 1)],
+    "ax_fluid": [("axial_fluid", "Axial", 1)],
+    "sag_cor_fluid": [
+        ("sagittal_fluid", "Sagittal", 1),
+        ("coronal_fluid", "Coronal", 1),
+    ],
+    "sag_ax_fluid": [
+        ("sagittal_fluid", "Sagittal", 1),
+        ("axial_fluid", "Axial", 1),
+    ],
+}
+
+
+# Which plane actually answers each question. A cruciate ligament is a sagittal
+# problem, a collateral ligament a coronal one, a Baker's cyst an axial one; showing
+# all four series for every finding spends tokens on views that cannot resolve it.
+FINDING_PLAN = {
+    "ACL": "sag_fluid",
+    "MCL": "cor_fluid",
+    "Medial Meniscus": "sag_cor_fluid",
+    "Lateral Meniscus": "sag_cor_fluid",
+    "Medial OA": "cor_fluid",
+    "Lateral OA": "cor_fluid",
+    "PF OA": "sag_ax_fluid",
+    "Effusion": "sag_ax_fluid",
+    "Synovitis": "sag_ax_fluid",
+    "Baker's": "ax_fluid",
+    "Contusion": "sag_cor_fluid",
+    "Fracture": "sag_cor_fluid",
 }
 
 

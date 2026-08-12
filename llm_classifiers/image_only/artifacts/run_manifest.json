@@ -64,6 +64,131 @@
     "1.2.826.0.1.3680043.8.498.97274720257634584071500649275217521662"
   ],
   "conditions": {
+    "v2_digit": {
+      "name": "v2_digit",
+      "strategy": "binary_digit",
+      "guided": true,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "samples": 1,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 4,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 32,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_verbal",
+      "max_tokens": 1,
+      "answer_format": "digit",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
+    },
+    "v2_two_stage_t07_x5": {
+      "name": "v2_two_stage_t07_x5",
+      "strategy": "two_stage",
+      "guided": true,
+      "temperature": 0.7,
+      "top_p": 0.95,
+      "samples": 5,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 4,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 32,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_average",
+      "max_tokens": 1400,
+      "answer_format": "likert",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
+    },
+    "v2_digit_t07_x5": {
+      "name": "v2_digit_t07_x5",
+      "strategy": "binary_digit",
+      "guided": true,
+      "temperature": 0.7,
+      "top_p": 0.95,
+      "samples": 5,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 4,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 32,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_average",
+      "max_tokens": 1,
+      "answer_format": "digit",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
+    },
+    "v2_two_stage_background": {
+      "name": "v2_two_stage_background",
+      "strategy": "two_stage",
+      "guided": true,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "samples": 1,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 4,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 32,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_guidance",
+      "max_tokens": 1400,
+      "answer_format": "likert",
+      "background": true,
+      "few_shot": 0,
+      "view_targeted": false
+    },
+    "v2_digit_background": {
+      "name": "v2_digit_background",
+      "strategy": "binary_digit",
+      "guided": true,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "samples": 1,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 4,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 32,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_verbal",
+      "max_tokens": 1,
+      "answer_format": "digit",
+      "background": true,
+      "few_shot": 0,
+      "view_targeted": false
+    },
     "format_likert_two_stage": {
       "name": "format_likert_two_stage",
       "strategy": "two_stage",
@@ -84,7 +209,60 @@
       },
       "axis": "format",
       "max_tokens": 1400,
-      "answer_format": "likert"
+      "answer_format": "likert",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
+    },
+    "v2_words": {
+      "name": "v2_words",
+      "strategy": "binary_words",
+      "guided": true,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "samples": 1,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 4,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 32,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_verbal",
+      "max_tokens": 4,
+      "answer_format": "words_lp",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
+    },
+    "v2_questions": {
+      "name": "v2_questions",
+      "strategy": "two_stage_questions",
+      "guided": true,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "samples": 1,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 4,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 32,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_guidance",
+      "max_tokens": 1600,
+      "answer_format": "probability",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
     },
     "prompt_two_stage": {
       "name": "prompt_two_stage",
@@ -106,7 +284,35 @@
       },
       "axis": "prompt",
       "max_tokens": 1400,
-      "answer_format": "probability"
+      "answer_format": "probability",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
+    },
+    "v2_words_targeted": {
+      "name": "v2_words_targeted",
+      "strategy": "binary_words",
+      "guided": true,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "samples": 1,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 4,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 32,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_verbal",
+      "max_tokens": 4,
+      "answer_format": "words_lp",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": true
     },
     "sample_t10_x3": {
       "name": "sample_t10_x3",
@@ -128,7 +334,35 @@
       },
       "axis": "sampling",
       "max_tokens": 700,
-      "answer_format": "probability"
+      "answer_format": "probability",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
+    },
+    "v2_digit_targeted": {
+      "name": "v2_digit_targeted",
+      "strategy": "binary_digit",
+      "guided": true,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "samples": 1,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 4,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 32,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_verbal",
+      "max_tokens": 1,
+      "answer_format": "digit",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": true
     },
     "format_likert_checklist": {
       "name": "format_likert_checklist",
@@ -150,7 +384,10 @@
       },
       "axis": "format",
       "max_tokens": 700,
-      "answer_format": "likert"
+      "answer_format": "likert",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
     },
     "prompt_joint_prevalence_free": {
       "name": "prompt_joint_prevalence_free",
@@ -172,7 +409,35 @@
       },
       "axis": "prompt",
       "max_tokens": 700,
-      "answer_format": "probability"
+      "answer_format": "probability",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
+    },
+    "v2_likert_t07_x5": {
+      "name": "v2_likert_t07_x5",
+      "strategy": "joint_definitions",
+      "guided": true,
+      "temperature": 0.7,
+      "top_p": 0.95,
+      "samples": 5,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 4,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 32,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_average",
+      "max_tokens": 700,
+      "answer_format": "likert",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
     },
     "sample_t06_x3": {
       "name": "sample_t06_x3",
@@ -194,7 +459,35 @@
       },
       "axis": "sampling",
       "max_tokens": 700,
-      "answer_format": "probability"
+      "answer_format": "probability",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
+    },
+    "v2_questions_background": {
+      "name": "v2_questions_background",
+      "strategy": "two_stage_questions",
+      "guided": true,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "samples": 1,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 4,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 32,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_guidance",
+      "max_tokens": 1600,
+      "answer_format": "probability",
+      "background": true,
+      "few_shot": 0,
+      "view_targeted": false
     },
     "prompt_binary_logprob": {
       "name": "prompt_binary_logprob",
@@ -216,7 +509,10 @@
       },
       "axis": "prompt",
       "max_tokens": 1,
-      "answer_format": "probability"
+      "answer_format": "probability",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
     },
     "sample_t06_x5": {
       "name": "sample_t06_x5",
@@ -238,7 +534,35 @@
       },
       "axis": "sampling",
       "max_tokens": 700,
-      "answer_format": "probability"
+      "answer_format": "probability",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
+    },
+    "v2_fewshot2_yesno": {
+      "name": "v2_fewshot2_yesno",
+      "strategy": "fewshot_yesno",
+      "guided": true,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "samples": 1,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 3,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 12,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_fewshot",
+      "max_tokens": 1,
+      "answer_format": "probability",
+      "background": false,
+      "few_shot": 2,
+      "view_targeted": true
     },
     "prompt_binary_json": {
       "name": "prompt_binary_json",
@@ -260,7 +584,35 @@
       },
       "axis": "prompt",
       "max_tokens": 200,
-      "answer_format": "probability"
+      "answer_format": "probability",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
+    },
+    "v2_fewshot1_yesno": {
+      "name": "v2_fewshot1_yesno",
+      "strategy": "fewshot_yesno",
+      "guided": true,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "samples": 1,
+      "image": {
+        "plan": "tri_fluid_plus_t1",
+        "slices_per_series": 3,
+        "size": 896,
+        "window": "percentile",
+        "layout": "individual",
+        "sampling": "fixed",
+        "stride": 8,
+        "max_images": 12,
+        "center_fraction": 0.7
+      },
+      "axis": "v2_fewshot",
+      "max_tokens": 1,
+      "answer_format": "probability",
+      "background": false,
+      "few_shot": 1,
+      "view_targeted": true
     },
     "sample_t06_p80_x3": {
       "name": "sample_t06_p80_x3",
@@ -282,7 +634,10 @@
       },
       "axis": "sampling",
       "max_tokens": 700,
-      "answer_format": "probability"
+      "answer_format": "probability",
+      "background": false,
+      "few_shot": 0,
+      "view_targeted": false
     }
   }
 }

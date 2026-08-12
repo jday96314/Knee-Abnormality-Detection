@@ -1,0 +1,14 @@
+# Ignore every file by default.
+*
+
+# Keep directories visible so Git can discover allowed files within them.
+!*/
+
+# Allow source, documentation, configuration, and notebooks.
+!*.py
+!*.md
+!*.json
+!*.ipynb
+
+# Allow this whitelist itself.
+!.gitignore

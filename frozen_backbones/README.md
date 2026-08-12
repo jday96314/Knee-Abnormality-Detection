@@ -9,22 +9,24 @@ from 5-fold stratified CV on the 58 fully-labeled studies.
 
 | | macro AUC |
 |---|---|
-| Best configuration, 20 held-out CV seeds | **0.665 ± 0.015** |
-| Same, seed-averaged OOF predictions | **0.685**, 95% CI **[0.630, 0.740]** (bootstrap over studies) |
-| Best flat-bag (non-hierarchical) configuration | 0.661 ± 0.013 |
+| **Three-backbone ensemble**, 10 unseen CV seeds | **0.688 ± 0.013** |
+| Same, seed-averaged OOF predictions | **0.706**, 95% CI **[0.652, 0.756]** (bootstrap over studies) |
+| Best single configuration | 0.670 ± 0.012 |
 | Simplest thing that works (`mri_core/cls`, plain mean) | 0.652 ± 0.014 |
+| Attention-based MIL (best variant) | 0.596 ± 0.020 |
 | Labels shuffled (permutation baseline) | 0.493 ± 0.026 |
 
-Best configuration: **OrthoFoundation @ 224px, `patch_std` read-out,
-`meanmax-plane-axmean-ctr`** — over the central half of each stack, mean⊕max
-within each plane, then averaged across planes.
+Best result: **rank-averaged ensemble of three linear probes** — OrthoFoundation
+`cls`, OrthoFoundation `patch_std`, MRI-CORE `cls`, each with its own pooling.
+Best *single* configuration: MRI-CORE @ 224px, `cls`, `meanstd-plane-axmean-ctr`.
 
-**The honest reading.** The bootstrap CI over studies spans 0.11 of AUC. Every
-pooling strategy tested falls inside that interval. Pooling choice is worth about
-0.02 macro AUC end to end; the 58-study cohort is worth five times that in
-uncertainty. The rankings below are real -- the matched hierarchical comparisons
-hold at p<0.005 across 20 CV partitions -- but they are rankings over partitions
-of one small cohort, not claims about new data.
+**The honest reading.** The bootstrap CI over studies spans 0.10 of AUC. Every
+model built here falls inside that interval, including the MIL that scores 0.09
+lower. Modelling choices are worth ~0.05 macro AUC end to end (0.652 plain mean
+-> 0.706 ensemble); the 58-study cohort is worth twice that in uncertainty. The
+rankings below are real -- the matched comparisons hold at p<0.005 across CV
+partitions -- but they are rankings over partitions of one small cohort, not
+claims about new data.
 
 ## What actually moved the metric
 
@@ -114,9 +116,101 @@ out of the 288 scored 0.692; on 20 held-out seeds the same configuration scores
 hundred noisy estimates buys about 0.03 of pure selection bias. Only the matched
 comparisons above, and the held-out re-scoring in `confirm.py`, are load-bearing.
 
+## Ensembling, MIL, and orientation
+
+Three follow-up experiments, all scored on CV seeds disjoint from those used to
+choose their members (`ensemble.py`, `ensemble2.py`, `mil.py`).
+
+### Prediction-level ensembling works; feature-level fusion does not
+
+Concatenating two backbones' *features* scores **below** the better one alone
+(0.633 vs 0.669). Rank-averaging their *predictions* scores above it:
+
+| Members (seeds 200-209) | macro AUC |
+|---|---|
+| ortho/cls + ortho/patch_std + mri/cls | **0.6875 ± 0.0127** |
+| + ortho/patch_max (4 members) | 0.6857 ± 0.0143 |
+| best single member (mri/cls) | 0.6626 |
+
+Same information, opposite sign, because prediction-level combination never pays
+the union's dimensionality cost -- each member is fitted in its own smaller
+space. **Rank averaging beat probability averaging in 26/26 ensembles** (+0.008
+mean): the members are separate logistic regressions with differently calibrated
+probabilities, so a plain mean lets the most confident member dominate rather
+than the most correct one. Gains saturate at 3-4 members and reverse at 5.
+
+This is the largest single improvement in the project: +0.025 over the best
+member, and the seed-to-seed spread *narrows* (0.0127 vs 0.0146).
+
+### Attention MIL underperforms, and not for want of tuning
+
+Gated attention (Ilse et al. 2018) over the same cached features reaches
+**0.596** against 0.670 for a linear probe on fixed pooling:
+
+| Source | plain | plane_embed | plane_attn | orient |
+|---|---|---|---|---|
+| mri_core/cls | 0.5907 | **0.5959** | 0.5841 | 0.5959 |
+| ortho/cls | 0.5855 | **0.5923** | 0.5824 | 0.5817 |
+| ortho/patch_std | 0.5770 | **0.5794** | 0.5733 | 0.5790 |
+
+It was given a fair run: a 32-point grid over bag level, PCA dimension,
+projection width, weight decay and dropout peaked at 0.594. Two structural fixes
+helped and still did not close the gap -- PCA inside the fold (a 1024->64 input
+projection is 65k parameters against 46 training bags) and *series-level* bags,
+which shrink a bag from ~180 slices to ~6 series descriptors.
+
+The diagnosis is sample size, not architecture. A learned attention has to
+discover which slices matter from 46 bags; a fixed p90 encodes the same prior for
+free. This is worth stating plainly because the hierarchical result pointed at
+MIL as the natural next step -- that reasoning was right about the mechanism and
+wrong about whether 58 studies can supervise it.
+
+**MIL does not even work as an ensemble member.** A weak model can still help if
+its errors are decorrelated, so it was tried as a fifth member; it *lowered* the
+score in all 15 matched subsets, by 0.002 to 0.009.
+
+### Orientation-aware heads: no gain, for a measurable reason
+
+Inside MIL, conditioning the attention on plane (`plane_embed`) is the best
+variant but only by +0.005 in a ±0.02 spread; a separate attention per plane
+(`plane_attn`) is consistently the *worst*, splitting scarce supervision three
+ways.
+
+For the linear probes, `probe.orientation_weights` builds a genuinely continuous
+version: the squared direction cosines of each series' slice normal form a soft
+partition of unity over the three cardinal axes, so a 38-degree-oblique coronal
+splits its contribution instead of being hard-binned. For all three sources the
+best configuration still uses hard `plane` grouping.
+
+The reason is measurable rather than mysterious: **the median series puts 0.985
+of its weight on one axis, and 274 of 336 exceed 0.95.** The soft partition is
+nearly identical to the hard one, so it adds cross-contamination noise without
+new information -- only 62 series are oblique enough to matter. One exception:
+for `mri_core/cls` with a plain mean reducer, soft orientation did beat its
+matched hard-plane counterpart (+0.012 to +0.021, p=0.002), but that baseline is
+weak for that source and the best `mri_core/cls` config overall is hard-binned.
+
 ## Per-label
 
-Leading configuration, 20 held-out seeds:
+Three-member ensemble, seed-averaged OOF:
+
+| Finding | Positives | AUC | Finding | Positives | AUC |
+|---|---|---|---|---|---|
+| Medial OA | 15 | 0.848 | ACL | 24 | 0.695 |
+| Effusion | 35 | 0.805 | Contusion | 19 | 0.691 |
+| Lateral OA | 11 | 0.793 | MCL | 9 | 0.689 |
+| Medial Meniscus | 26 | 0.718 | Synovitis | 27 | 0.663 |
+| Lateral Meniscus | 23 | 0.701 | PF OA | 21 | 0.660 |
+| | | | Fracture | 18 | 0.635 |
+| | | | Baker's | 12 | 0.576 |
+
+Ensembling lifts the labels that single models left at chance: Fracture 0.54 ->
+0.63 and Contusion 0.64 -> 0.69. Baker's cyst (0.576) remains the one finding
+with no convincing signal.
+
+### Single-model per-label
+
+Best single configuration, 20 held-out seeds:
 
 | Finding | Positives | AUC | Finding | Positives | AUC |
 |---|---|---|---|---|---|
@@ -207,6 +301,9 @@ python analyze.py sweep.csv                          # marginal effect of each a
 python analyze.py hier.csv
 python stage2.py --seeds 5 --top-k 6                 # L2, head/backbone fusion
 python confirm.py --first-seed 100 --n-seeds 20      # held-out seeds + permutation
+python ensemble.py --first-seed 100 --n-seeds 20     # prediction-level ensembling
+python mil.py --first-seed 100 --n-seeds 10          # attention MIL + orientation heads
+python ensemble2.py --first-seed 200 --n-seeds 10    # final ensemble, incl. a MIL member
 python -m pytest tests/                              # pooling and speedup correctness
 ```
 

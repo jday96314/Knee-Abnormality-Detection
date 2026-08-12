@@ -174,3 +174,59 @@ if __name__ == "__main__":
     print(f"cohort: {len(studies)} labeled studies")
     frame = build_cache(size)
     print(f"cached {frame.n_slices.sum()} slices across {len(frame)} series at {size}px")
+
+
+# ---------------------------------------------------------------------------
+# Series orientation
+# ---------------------------------------------------------------------------
+
+
+def series_orientation(size: int = 448) -> pd.DataFrame:
+    """Direction cosines and slice normal for every series, from DICOM headers.
+
+    `Anatomical_Plane` bins each series into three labels, which throws away how
+    oblique it actually is -- a coronal-oblique ACL series and a true coronal are
+    both "Coronal". `ImageOrientationPatient` keeps that, so an orientation-aware
+    head can condition on the real geometry rather than the bin.
+
+    The slice normal's sign depends on acquisition direction and carries no
+    anatomical meaning, so it is canonicalized to have its dominant component
+    positive; otherwise two identical acquisitions could sit at opposite ends of
+    the feature.
+    """
+    cache_file = CACHE / f"slices{size}" / "orientation.json"
+    if cache_file.exists():
+        return pd.DataFrame(json.loads(cache_file.read_text()))
+
+    _, series = cohort()
+    rows = []
+    for record in series.itertuples():
+        folder = DATA / "train_series" / record.StudyInstanceUID / record.SeriesInstanceUID
+        first = next((p for p in sorted(folder.iterdir()) if p.suffix == ".dcm"), None)
+        orientation = None
+        if first is not None:
+            header = pydicom.dcmread(first, stop_before_pixels=True, force=True)
+            raw = getattr(header, "ImageOrientationPatient", None)
+            if raw is not None and len(raw) == 6:
+                orientation = np.asarray(raw, dtype=float)
+
+        if orientation is None:
+            normal = np.zeros(3)
+            orientation = np.zeros(6)
+        else:
+            normal = np.cross(orientation[:3], orientation[3:])
+            norm = np.linalg.norm(normal)
+            normal = normal / norm if norm > 1e-6 else normal
+            if normal[np.argmax(np.abs(normal))] < 0:
+                normal = -normal
+
+        rows.append({
+            "StudyInstanceUID": record.StudyInstanceUID,
+            "SeriesInstanceUID": record.SeriesInstanceUID,
+            "plane": record.Anatomical_Plane,
+            **{f"iop{i}": float(v) for i, v in enumerate(orientation)},
+            **{f"normal{i}": float(v) for i, v in enumerate(normal)},
+        })
+
+    cache_file.write_text(json.dumps(rows))
+    return pd.DataFrame(rows)

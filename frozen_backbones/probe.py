@@ -112,7 +112,7 @@ class Pooling:
     def groups(self) -> list[str]:
         if self.group == "all":
             return [""]
-        if self.group == "plane":
+        if self.group in ("plane", "orient"):
             return list(PLANES)
         if self.group == "fluid":
             return ["0", "1"]
@@ -121,13 +121,74 @@ class Pooling:
         raise ValueError(self.group)
 
     def key_of(self, meta: pd.DataFrame) -> np.ndarray | None:
-        if self.group == "all":
+        if self.group in ("all", "orient"):
             return None
         if self.group == "plane":
             return meta["plane"].to_numpy().astype(str)
         if self.group == "fluid":
             return meta["fluid"].astype(str).to_numpy()
         return (meta["plane"].astype(str) + "|" + meta["fluid"].astype(str)).to_numpy()
+
+
+def orientation_weights(meta: pd.DataFrame) -> np.ndarray:
+    """Soft membership of each slice in the three cardinal orientations.
+
+    `Anatomical_Plane` hard-assigns every series to one of three bins, but this
+    cohort's series run up to 38 degrees off-axis, and a coronal-oblique
+    acquisition genuinely carries some of what an axial would show. The squared
+    direction cosines of the slice normal give exactly that: a partition of unity
+    over the three axes (they sum to 1 for a unit vector), so a true coronal
+    contributes 1.0 to the coronal block and an oblique one splits itself.
+
+    Returns [n_slices, 3] in PLANES order (Sagittal, Coronal, Axial), matching
+    the L-R / A-P / S-I patient axes that define those planes.
+    """
+    normals = data.series_orientation().set_index("SeriesInstanceUID")
+    columns = normals[["normal0", "normal1", "normal2"]]
+    per_slice = columns.reindex(meta["series"].to_numpy()).to_numpy(dtype=np.float64)
+    weights = per_slice ** 2
+    total = weights.sum(axis=1, keepdims=True)
+    # A series whose orientation is missing falls back to uniform membership
+    # rather than dropping out of every block.
+    return np.where(total > 1e-6, weights / np.maximum(total, 1e-12), 1 / 3)
+
+
+def _soft_block(features: np.ndarray, meta: pd.DataFrame, mask: np.ndarray,
+                weight: np.ndarray, pooling: Pooling) -> np.ndarray:
+    """One orientation block: a weighted mean, optionally over series descriptors.
+
+    Only mean-like reductions are weighted here, because a weighted maximum is
+    not well defined -- scaling a feature by its membership would confound "this
+    slice is oblique" with "this slice responded weakly". The focal-preserving
+    work is done by `inner` instead: each series is collapsed by, say, p90 first,
+    and the orientation weights then combine those series descriptors. That
+    composes the hierarchical result with soft orientation rather than forcing a
+    choice between them.
+    """
+    if pooling.reduce not in ("mean", "meanstd"):
+        raise ValueError(f"group='orient' supports mean/meanstd, not {pooling.reduce!r}")
+
+    width = features.shape[1]
+    size = width * (2 if pooling.reduce == "meanstd" else 1)
+    if not mask.any():
+        return np.zeros(size)
+
+    block, w = features[mask], weight[mask]
+    if pooling.inner:
+        series = meta.loc[mask, "series"].to_numpy()
+        unique = pd.unique(series)
+        block = np.stack([_reduce(block[series == s], pooling.inner) for s in unique])
+        # Orientation is a property of the series, so one weight per descriptor.
+        w = np.array([w[series == s][0] for s in unique])
+
+    total = w.sum()
+    if total < 1e-8:
+        return np.zeros(size)
+    mean = (w[:, None] * block).sum(0) / total
+    if pooling.reduce == "mean":
+        return mean
+    variance = (w[:, None] * (block - mean) ** 2).sum(0) / total
+    return np.concatenate([mean, np.sqrt(np.maximum(variance, 0.0))])
 
 
 def pool_studies(features: np.ndarray, meta: pd.DataFrame, studies: list[str],
@@ -149,16 +210,21 @@ def pool_studies(features: np.ndarray, meta: pd.DataFrame, studies: list[str],
     keys = pooling.key_of(meta)
     study_of = meta["study"].to_numpy()
     position = meta["pos"].to_numpy()
+    soft = orientation_weights(meta) if pooling.group == "orient" else None
     rows = []
 
     width = features.shape[1]
     for study in studies:
         in_study = study_of == study
         blocks = []
-        for group in pooling.groups():
+        for axis, group in enumerate(pooling.groups()):
             mask = in_study if keys is None else (in_study & (keys == group))
             if pooling.central:
                 mask = mask & (position > 0.25) & (position < 0.75)
+
+            if soft is not None:
+                blocks.append(_soft_block(features, meta, mask, soft[:, axis], pooling))
+                continue
 
             if not mask.any():
                 # When groups are reduced across rather than concatenated, a

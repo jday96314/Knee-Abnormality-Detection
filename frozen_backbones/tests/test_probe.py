@@ -182,3 +182,31 @@ def test_across_reduces_groups_instead_of_concatenating():
     assert np.allclose(
         probe.pool_studies(features, meta, ["s0"], probe.Pooling("mean", "plane", across="max")),
         np.full((1, 5), 3.0))
+
+
+def test_orientation_weights_are_a_partition_of_unity():
+    import data
+    meta = pd.DataFrame({"series": data.series_orientation()["SeriesInstanceUID"]})
+    w = probe.orientation_weights(meta)
+    assert w.shape == (len(meta), 3)
+    assert np.allclose(w.sum(axis=1), 1.0)
+    assert (w >= 0).all()
+
+
+def test_soft_orientation_splits_an_oblique_series():
+    """A 45-degree oblique series contributes to two blocks, a cardinal one to one."""
+    import types
+    # normal along +y is a pure Coronal; normal at 45 deg between y and z splits.
+    fake = pd.DataFrame([
+        {"SeriesInstanceUID": "cardinal", "normal0": 0.0, "normal1": 1.0, "normal2": 0.0},
+        {"SeriesInstanceUID": "oblique", "normal0": 0.0,
+         "normal1": 2 ** -0.5, "normal2": 2 ** -0.5},
+    ])
+    original = probe.data.series_orientation
+    probe.data.series_orientation = lambda *a, **k: fake
+    try:
+        w = probe.orientation_weights(pd.DataFrame({"series": ["cardinal", "oblique"]}))
+    finally:
+        probe.data.series_orientation = original
+    assert np.allclose(w[0], [0.0, 1.0, 0.0])
+    assert np.allclose(w[1], [0.0, 0.5, 0.5])

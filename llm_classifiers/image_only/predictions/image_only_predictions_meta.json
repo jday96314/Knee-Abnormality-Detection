@@ -1,0 +1,28 @@
+{
+  "config": "best",
+  "conditions": [
+    "v3_two_stage_tta_slices3_t07",
+    "v2_two_stage_t07_x5"
+  ],
+  "model": "google/medgemma-1.5-4b-it",
+  "calibrate": "none",
+  "n_studies": 4407,
+  "n_complete": 4407,
+  "teacher_macro_auc_on_58_labelled": 0.7012,
+  "teacher_per_finding_auc": {
+    "ACL": 0.568,
+    "MCL": 0.596,
+    "Medial Meniscus": 0.633,
+    "Lateral Meniscus": 0.709,
+    "Medial OA": 0.86,
+    "Lateral OA": 0.746,
+    "PF OA": 0.742,
+    "Effusion": 0.919,
+    "Synovitis": 0.697,
+    "Baker's": 0.59,
+    "Contusion": 0.711,
+    "Fracture": 0.643
+  },
+  "note": "Soft targets from an image-only teacher, not ground truth. Per-finding AUC varies from ~0.54 (MCL) to ~0.88 (Effusion); weight or filter accordingly. Raw probabilities are compressed and uncalibrated - prefer --calibrate rank if the student is trained on relative ordering.",
+  "auc_measured_on": "the 58 gold-labelled studies, by the shipped config itself"
+}

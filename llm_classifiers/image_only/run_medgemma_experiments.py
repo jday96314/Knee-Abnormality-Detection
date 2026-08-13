@@ -37,6 +37,7 @@ import json
 import math
 import re
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -893,6 +894,25 @@ def image_content(images: list[tuple[str, str]]) -> list[dict[str, Any]]:
 
 
 @dataclass
+class Endpoint:
+    """One vLLM server, with the concurrency that server is actually fastest at.
+
+    Servers differ in hardware and saturate at different points: measured here, a
+    single 4090 ceilings near 2.6 req/s while a pair of 5090s reaches 17 req/s and
+    stops improving past concurrency 32. Work is pulled from a shared queue rather
+    than split up front, so a server that is 6x faster simply takes 6x the jobs and
+    no static ratio has to be guessed.
+    """
+
+    client: AsyncOpenAI
+    concurrency: int
+    name: str
+    # Optional wall-clock budget: after this many seconds the endpoint stops taking
+    # new work and drains, so a borrowed machine can be handed back on schedule.
+    max_seconds: float | None = None
+
+
+@dataclass
 class Job:
     uid: str
     label: str  # "__joint__" for whole-study requests
@@ -910,6 +930,7 @@ class Runner:
         cohort: str,
         concurrency: int,
         max_retries: int,
+        endpoints: list[Endpoint] | None = None,
         labels: pd.DataFrame | None = None,
         image_cache: Path | None = None,
     ) -> None:
@@ -926,10 +947,16 @@ class Runner:
         # runs against different servers should share one cache rather than each
         # paying the several-seconds-per-study rendering cost again.
         self.image_cache = image_cache or (out_dir / "image_cache")
-        self.semaphore = asyncio.Semaphore(concurrency)
+        self.endpoints = endpoints or [Endpoint(client, concurrency, "default")]
         self.max_retries = max_retries
         self.write_lock = asyncio.Lock()
-        self._image_cache: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        # Bounded LRU. Each entry is a study's base64 data URIs — roughly 4 MB — so an
+        # unbounded dict reaches ~53 GB over 4,407 studies and the process is OOM-killed.
+        # It only needs to span the studies currently in flight: every request for a
+        # given study and spec is served from one entry, and once that study's repeats
+        # are done the entry is dead weight.
+        self._image_cache: OrderedDict[tuple[str, str], list[tuple[str, str]]] = OrderedDict()
+        self._image_cache_max = max(64, 4 * sum(e.concurrency for e in (endpoints or [])) or 256)
         self._image_lock = asyncio.Lock()
         self._reading_cache: dict[tuple[str, str], str] = {}
 
@@ -967,6 +994,7 @@ class Runner:
         key = (uid, spec.key())
         async with self._image_lock:
             if key in self._image_cache:
+                self._image_cache.move_to_end(key)
                 return self._image_cache[key]
         images = await asyncio.to_thread(
             build_study_images,
@@ -980,15 +1008,25 @@ class Runner:
             raise ValueError(f"no series matched plan {spec.plan!r} for study {uid}")
         async with self._image_lock:
             self._image_cache[key] = images
+            self._image_cache.move_to_end(key)
+            while len(self._image_cache) > self._image_cache_max:
+                # Evicted entries are still on disk as PNGs, so a re-read is cheap.
+                self._image_cache.popitem(last=False)
         return images
 
     async def describe(
-        self, uid: str, condition: Condition, seed: int, spec: ImageSpec
+        self, uid: str, condition: Condition, seed: int, spec: ImageSpec,
+        client: AsyncOpenAI | None = None,
     ) -> tuple[str, Any]:
-        """Stage one of the two-stage strategy: a free-text reading of the images."""
+        """Stage one of the two-stage strategy: a free-text reading of the images.
+
+        Runs on the endpoint that owns the job. Without that, every multi-stage request
+        sends its expensive half — this one, which generates ~1,200 tokens — to a single
+        server while the others idle, and horizontal scaling silently does nothing.
+        """
         images = await self.images_for(uid, spec)
         captions = [caption for caption, _ in images]
-        completion = await self.client.chat.completions.create(
+        completion = await (client or self.client).chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": DESCRIBE_SYSTEM},
@@ -1016,12 +1054,16 @@ class Runner:
         return reading, completion.usage
 
     async def read_out(
-        self, uid: str, condition: Condition, seed: int, spec: ImageSpec
+        self, uid: str, condition: Condition, seed: int, spec: ImageSpec,
+        client: AsyncOpenAI | None = None,
     ) -> tuple[str, Any]:
-        """Stage one of `two_stage_questions`: answers to a fixed structured read-out."""
+        """Stage one of `two_stage_questions`: answers to a fixed structured read-out.
+
+        Runs on the endpoint that owns the job, for the same reason as `describe`.
+        """
         images = await self.images_for(uid, spec)
         captions = [caption for caption, _ in images]
-        completion = await self.client.chat.completions.create(
+        completion = await (client or self.client).chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": QUESTIONS_SYSTEM},
@@ -1086,7 +1128,10 @@ class Runner:
             {"role": "user", "content": content},
         ], total_images
 
-    async def run_one(self, condition: Condition, job: Job) -> dict[str, Any]:
+    async def run_one(
+        self, condition: Condition, job: Job, endpoint: Endpoint | None = None
+    ) -> dict[str, Any]:
+        client = (endpoint or self.endpoints[0]).client
         seed = seed_for(f"{condition.name}|{job.uid}|{job.label}|{job.repeat}")
         spec = self.spec_for(condition, job.label, job.repeat)
         images = await self.images_for(job.uid, spec)
@@ -1102,7 +1147,7 @@ class Runner:
             messages, n_images = await self.fewshot_messages(condition, job)
             schema = single_schema(condition.answer_format)
         elif condition.strategy == "two_stage_questions":
-            reading, stage_one_usage = await self.read_out(job.uid, condition, seed, spec)
+            reading, stage_one_usage = await self.read_out(job.uid, condition, seed, spec, client)
             messages = [
                 {"role": "system", "content": SYSTEM_BASE},
                 {
@@ -1144,7 +1189,7 @@ class Runner:
             ]
             schema = single_schema(condition.answer_format)
         elif condition.strategy == "two_stage":
-            reading, stage_one_usage = await self.describe(job.uid, condition, seed, spec)
+            reading, stage_one_usage = await self.describe(job.uid, condition, seed, spec, client)
             messages = [
                 {"role": "system", "content": SYSTEM_BASE},
                 {"role": "user", "content": score_reading_prompt(reading) + scale},
@@ -1204,9 +1249,15 @@ class Runner:
         elif condition.guided:
             request["response_format"] = response_format(condition.name, schema)
 
-        completion = await self.client.chat.completions.create(**request)
+        completion = await client.chat.completions.create(**request)
         choice = completion.choices[0]
         content = choice.message.content or ""
+
+        if condition.uses_logprobs and not (choice.logprobs and choice.logprobs.content):
+            # Seen from a degraded/restarting server: a 200 with no logprobs. Raising a
+            # plain exception routes this to the transport retry path; a ParseFailure
+            # would be treated as deterministic and never retried at temperature 0.
+            raise RuntimeError("response carried no logprobs; treating as transient")
 
         try:
             if condition.uses_logprobs:
@@ -1285,35 +1336,38 @@ class Runner:
         failures: list[str] = []
         started = time.perf_counter()
 
-        async def worker(job: Job) -> None:
+        async def attempt_job(job: Job, endpoint: Endpoint) -> None:
             nonlocal completed
             last_error = ""
             last_failure: ParseFailure | None = None
-            async with self.semaphore:
-                for attempt in range(self.max_retries + 1):
-                    try:
-                        record = await self.run_one(condition, job)
-                    except ParseFailure as exc:
-                        last_error = f"ParseFailure: {exc}"
-                        last_failure = exc
-                        # Greedy decoding is deterministic, so a re-request with the
-                        # same seed would reproduce the same unparseable text.
-                        if condition.temperature == 0.0:
-                            break
-                        if attempt < self.max_retries:
-                            await asyncio.sleep(min(2**attempt, 8))
-                        continue
-                    except Exception as exc:  # noqa: BLE001 - transport errors are retried
-                        last_error = f"{type(exc).__name__}: {exc}"
-                        if attempt < self.max_retries:
-                            await asyncio.sleep(min(2**attempt, 8))
-                        continue
-                    async with self.write_lock:
-                        with cache_path.open("a", encoding="utf-8") as handle:
-                            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    completed += 1
-                    report_progress()
-                    return
+            for attempt in range(self.max_retries + 1):
+                try:
+                    record = await self.run_one(condition, job, endpoint)
+                except ParseFailure as exc:
+                    last_error = f"ParseFailure: {exc}"
+                    last_failure = exc
+                    # Greedy decoding is deterministic, so a re-request with the
+                    # same seed would reproduce the same unparseable text.
+                    if condition.temperature == 0.0:
+                        break
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(min(2**attempt, 8))
+                    continue
+                except Exception as exc:  # noqa: BLE001 - transport errors are retried
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    if attempt < self.max_retries:
+                        # Capped at a minute: a vLLM restart takes far longer than
+                        # the few seconds an 8s cap rides out, and an unattended
+                        # sweep should survive one rather than failing thousands
+                        # of cells that then need a whole extra pass.
+                        await asyncio.sleep(min(2**attempt, 60))
+                    continue
+                async with self.write_lock:
+                    with cache_path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                completed += 1
+                report_progress()
+                return
 
             # A cell that never parses is itself a result: record it, with the text
             # that defeated the parser, and let the sweep continue.
@@ -1356,7 +1410,29 @@ class Runner:
                     flush=True,
                 )
 
-        await asyncio.gather(*(worker(job) for job in jobs))
+        queue: asyncio.Queue[Job] = asyncio.Queue()
+        for job in jobs:
+            queue.put_nowait(job)
+
+        async def pump(endpoint: Endpoint) -> None:
+            """One in-flight slot on one endpoint, pulling until the queue is empty."""
+            while True:
+                if endpoint.max_seconds is not None and (
+                    time.perf_counter() - started > endpoint.max_seconds
+                ):
+                    return  # hand this machine back; the others finish the queue
+                try:
+                    job = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    await attempt_job(job, endpoint)
+                finally:
+                    queue.task_done()
+
+        await asyncio.gather(
+            *(pump(e) for e in self.endpoints for _ in range(e.concurrency))
+        )
         if failures:
             print(
                 f"  {condition.name}: {len(failures)} unrecoverable "

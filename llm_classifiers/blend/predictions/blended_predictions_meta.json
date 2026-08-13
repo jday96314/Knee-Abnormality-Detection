@@ -1,0 +1,74 @@
+{
+  "method": "shared-weight logistic blend of text and image logits",
+  "fitted_on": "the 58 gold-labelled studies",
+  "C": 1.0,
+  "text_slope": 0.733,
+  "image_slope": 0.3581,
+  "per_finding_intercept": {
+    "ACL": -0.0814,
+    "MCL": -0.5796,
+    "Medial Meniscus": -0.4419,
+    "Lateral Meniscus": 0.1843,
+    "Medial OA": -0.9088,
+    "Lateral OA": -0.8765,
+    "PF OA": 0.1801,
+    "Effusion": -1.5997,
+    "Synovitis": 0.726,
+    "Baker's": -0.5478,
+    "Contusion": -1.561,
+    "Fracture": 0.3366
+  },
+  "out_of_fold_macro_bce": 0.3508,
+  "out_of_fold_macro_auc": 0.8966,
+  "per_finding": {
+    "ACL": {
+      "bce": 0.2762,
+      "auc": 0.9289
+    },
+    "MCL": {
+      "bce": 0.194,
+      "auc": 0.9705
+    },
+    "Medial Meniscus": {
+      "bce": 0.292,
+      "auc": 0.9411
+    },
+    "Lateral Meniscus": {
+      "bce": 0.3546,
+      "auc": 0.9217
+    },
+    "Medial OA": {
+      "bce": 0.2267,
+      "auc": 0.9581
+    },
+    "Lateral OA": {
+      "bce": 0.3147,
+      "auc": 0.8356
+    },
+    "PF OA": {
+      "bce": 0.3366,
+      "auc": 0.9305
+    },
+    "Effusion": {
+      "bce": 0.4422,
+      "auc": 0.9118
+    },
+    "Synovitis": {
+      "bce": 0.5743,
+      "auc": 0.7897
+    },
+    "Baker's": {
+      "bce": 0.2697,
+      "auc": 0.875
+    },
+    "Contusion": {
+      "bce": 0.4328,
+      "auc": 0.8543
+    },
+    "Fracture": {
+      "bce": 0.4961,
+      "auc": 0.8417
+    }
+  },
+  "note": "The 58 gold studies hold out-of-fold predictions; the remaining 4,349 hold the mean over all fold-models. Metrics above are out-of-fold and therefore honest, but the blender was selected on these same studies, so they still omit selection uncertainty."
+}

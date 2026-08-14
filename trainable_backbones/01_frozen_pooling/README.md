@@ -1,8 +1,12 @@
 # Architecture 1 — frozen encoder, fixed hierarchical pooling
 
-The plan's reference model and, so far, the best. Nothing is learned except a shallow
-head: slices become a series descriptor by fixed statistics, series are grouped by imaging
-plane, and the head maps the result to twelve independent logits.
+The plan's reference model, and the best of the frozen architectures — later beaten by
+architecture 3, which fine-tunes the encoder (0.4064 vs 0.4146). Nothing is learned here
+except a shallow head: slices become a series descriptor by fixed statistics, series are
+grouped by imaging plane, and the head maps the result to twelve independent logits.
+
+It remains a useful ensemble member: `arch 1 + arch 3 + arch 4` is the best combination
+found (0.3993 BCE), better than architecture 3 alone.
 
 ```
 slice -> frozen encoder -> [mean, p90, max] within series
@@ -57,3 +61,10 @@ mildly negative — with fixed pooling over the whole stack there is no encoder 
 regularised, so discarding slices only removes evidence. This should not be read as a
 verdict on those augmentations for the fine-tuned architectures, where an encoder does
 exist to regularise.
+
+**Read the whole table as "no measured effect."** The reproducibility floor for this script
+is about 0.003 BCE (see the top-level README): the best configuration scores 0.4146 inside
+the sweep and 0.417628 standalone, the latter reproducing bit-for-bit across three repeats.
+Every spread in the table above is at or below that, so the ordering of these four
+augmentation axes is not information. What *is* information is that no augmentation setting
+escapes a 0.004 band while fine-tuning the encoder moves the metric by 0.012.

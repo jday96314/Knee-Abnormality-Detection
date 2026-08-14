@@ -24,10 +24,8 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "frozen_backbones"))
-import backbones as fb  # noqa: E402
 
 PLANES = ["Sagittal", "Coronal", "Axial"]
 PLANE_INDEX = {p: i for i, p in enumerate(PLANES)}

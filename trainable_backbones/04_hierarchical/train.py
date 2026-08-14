@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Train and sweep architecture 2: learned pathology attention over series.
+"""Train and sweep architecture 4: hierarchical slice + series Transformer.
 
-Identical protocol, split, features and augmentations to architecture 1 — the only thing
-that changes is how series are combined into a study prediction. That is deliberate: the
-question this directory answers is whether learned per-finding series selection beats
-fixed pooling, and any other difference would confound it.
+Same features, same split, same augmentations as architectures 1 and 2, so the three are
+directly comparable and the only thing varying is how slices and series are aggregated.
 
-    python train.py --backbone mri_core --head cls --sweep
+Adds the plan's consistency regularisation: two independently augmented views of each study
+are pushed towards the same logits. That is the one training-side idea unique to this
+architecture, and it is cheap to test as an on/off axis.
+
+    python train.py --backbone mri_core --sweep
 """
 
 from __future__ import annotations
@@ -25,24 +27,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "common"))
 import dataset  # noqa: E402
 import features as featlib  # noqa: E402
 import protocol  # noqa: E402
-from augment import augment as feature_augment  # noqa: E402  (shared, in common/)
-from model import PLANE_INDEX, SeriesAttentionModel  # noqa: E402
+from augment import augment as feature_augment  # noqa: E402
+from model import PLANE_INDEX, HierarchicalModel  # noqa: E402
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MAX_SERIES = 16  # the cohort's maximum is 14; padding beyond that is never needed
-
-
-def pool(feats: torch.Tensor) -> torch.Tensor:
-    """The same fixed [mean, p90, max] slice pooling architecture 1 uses."""
-    return torch.cat([
-        feats.mean(0),
-        torch.quantile(feats.float(), 0.9, dim=0).to(feats.dtype),
-        feats.max(0).values,
-    ])
+MAX_SERIES = 16   # cohort maximum is 14
+MAX_SLICES = 48   # median series is 30 slices; the tail runs to a few hundred
 
 
 class SeriesBank:
-    """Per-study slice features plus the protocol metadata each series carries."""
+    """Per-study slice features, kept unpooled — this architecture needs the slice axis."""
 
     def __init__(self, array, index, studies, rows):
         wanted = set(studies.iloc[rows]["StudyInstanceUID"])
@@ -54,48 +48,57 @@ class SeriesBank:
             row = group.iloc[0]
             self.by_study.setdefault(study, []).append((
                 row["plane"], feats[group.index.to_numpy()],
-                int(row["fluid"]), int(row["fatsat"]),
-            ))
+                int(row["fluid"]), int(row["fatsat"])))
         self.dim = feats.shape[1]
 
 
-def build_batch(bank, uids, feat_dim, rng=None, aug=None):
-    """Pad each study to MAX_SERIES tokens and return the mask that hides the padding."""
+def subsample(n: int, k: int, rng) -> np.ndarray:
+    """Stratified `k` indices out of `n`, jittered when training."""
+    if n <= k:
+        return np.arange(n)
+    edges = np.linspace(0, n, k + 1)
+    if rng is None:
+        return ((edges[:-1] + edges[1:]) / 2).astype(int).clip(0, n - 1)
+    return np.array([rng.integers(int(a), max(int(a) + 1, int(b))) for a, b in
+                     zip(edges[:-1], edges[1:])]).clip(0, n - 1)
+
+
+def build_batch(bank, uids, dim, rng=None, aug=None):
     n = len(uids)
-    pooled = torch.zeros(n, MAX_SERIES, 3 * feat_dim)
+    feats = torch.zeros(n, MAX_SERIES, MAX_SLICES, dim)
+    slice_mask = torch.zeros(n, MAX_SERIES, MAX_SLICES, dtype=torch.bool)
     plane = torch.zeros(n, MAX_SERIES, dtype=torch.long)
     fluid = torch.zeros(n, MAX_SERIES, dtype=torch.long)
     fatsat = torch.zeros(n, MAX_SERIES, dtype=torch.long)
-    mask = torch.zeros(n, MAX_SERIES, dtype=torch.bool)
+    series_mask = torch.zeros(n, MAX_SERIES, dtype=torch.bool)
 
     for i, uid in enumerate(uids):
         entries = bank.by_study.get(uid, [])
         if aug is not None:
-            # Reuse architecture 1's augmentation on the (plane, feats) pairs, then put
-            # the metadata back, so both architectures see identical perturbations.
             meta = {id(f): (fl, fs) for _, f, fl, fs in entries}
             perturbed = feature_augment([(p, f) for p, f, _, _ in entries], rng, **aug)
             entries = [(p, f, *meta.get(id(f), (0, 0))) for p, f in perturbed]
         for j, (p, f, fl, fs) in enumerate(entries[:MAX_SERIES]):
             if f.shape[0] == 0:
                 continue
-            pooled[i, j] = pool(f)
+            sel = subsample(f.shape[0], MAX_SLICES, rng)
+            feats[i, j, :len(sel)] = f[sel]
+            slice_mask[i, j, :len(sel)] = True
             plane[i, j] = PLANE_INDEX.get(p, len(PLANE_INDEX))
-            fluid[i, j] = fl
-            fatsat[i, j] = fs
-            mask[i, j] = True
-        if not mask[i].any():          # a study must contribute at least one token
-            mask[i, 0] = True
-    return pooled, plane, fluid, fatsat, mask
+            fluid[i, j], fatsat[i, j] = fl, fs
+            series_mask[i, j] = True
+        if not series_mask[i].any():
+            series_mask[i, 0] = True
+            slice_mask[i, 0, 0] = True
+    return feats, slice_mask, plane, fluid, fatsat, series_mask
 
 
-def run_one(config, bank_tr, bank_ev, studies, split, feat_dim, seed=0, epochs=30):
+def run_one(config, bank_tr, bank_ev, studies, split, dim, seed=0, epochs=30):
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
-    net = SeriesAttentionModel(
-        feat_dim, d_model=config["d_model"], n_heads=config["n_heads"],
-        dropout=config["dropout"], n_layers=config["n_layers"],
-    ).to(DEVICE)
+    net = HierarchicalModel(dim, d_model=config["d_model"], slice_layers=config["slice_layers"],
+                            series_layers=config["series_layers"], dropout=config["dropout"],
+                            mode=config["mode"]).to(DEVICE)
     opt = torch.optim.AdamW(net.parameters(), lr=config["lr"], weight_decay=config["wd"])
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     loss_fn = nn.BCEWithLogitsLoss()
@@ -104,46 +107,60 @@ def run_one(config, bank_tr, bank_ev, studies, split, feat_dim, seed=0, epochs=3
     y_train = torch.from_numpy(protocol.soft_targets(studies, split["train"])).to(DEVICE)
     aug = {k: config[k] for k in ("slice_keep", "slice_dropout", "series_dropout", "noise")}
 
-    val_batch = [t.to(DEVICE) for t in build_batch(
-        bank_ev, studies.iloc[split["val"]]["StudyInstanceUID"].to_numpy(), feat_dim)]
-    gold_batch = [t.to(DEVICE) for t in build_batch(
-        bank_ev, studies.iloc[split["gold"]]["StudyInstanceUID"].to_numpy(), feat_dim)]
+    def eval_batches(rows):
+        uids = studies.iloc[rows]["StudyInstanceUID"].to_numpy()
+        return [[t.to(DEVICE) for t in build_batch(bank_ev, uids[s:s + 64], dim)]
+                for s in range(0, len(uids), 64)]
+
+    val_batches, gold_batches = eval_batches(split["val"]), eval_batches(split["gold"])
     y_val = protocol.soft_targets(studies, split["val"])
     y_gold = protocol.gold_targets(studies, split["gold"])
 
-    best = {"bce": np.inf, "auc": np.nan, "epoch": -1}
+    def predict(batches):
+        net.eval()
+        with torch.no_grad():
+            return np.concatenate([torch.sigmoid(net(*b)).cpu().numpy() for b in batches])
+
+    best = {"bce": np.inf, "auc": np.nan, "epoch": -1, "val": None, "gold": None}
     for epoch in range(epochs):
         net.train()
         order = rng.permutation(len(train_uids))
         for start in range(0, len(order), config["batch"]):
             sel = order[start:start + config["batch"]]
-            batch = [t.to(DEVICE) for t in build_batch(bank_tr, train_uids[sel], feat_dim, rng, aug)]
             target = y_train[sel]
+            batch = [t.to(DEVICE) for t in build_batch(bank_tr, train_uids[sel], dim, rng, aug)]
             opt.zero_grad()
-            loss_fn(net(*batch), target).backward()
+            logits = net(*batch)
+            loss = loss_fn(logits, target)
+            if config["consistency"] > 0:
+                # A second, independently augmented view of the same studies. The penalty is
+                # on probabilities rather than logits so it cannot be trivially satisfied by
+                # shrinking the logit scale.
+                other = [t.to(DEVICE) for t in build_batch(bank_tr, train_uids[sel], dim, rng, aug)]
+                loss = loss + config["consistency"] * nn.functional.mse_loss(
+                    torch.sigmoid(net(*other)), torch.sigmoid(logits).detach())
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
             opt.step()
         sched.step()
 
-        net.eval()
-        with torch.no_grad():
-            p_val = torch.sigmoid(net(*val_batch)).cpu().numpy()
-            p_gold = torch.sigmoid(net(*gold_batch)).cpu().numpy()
+        p_val = predict(val_batches)
         bce = float(protocol.soft_bce(y_val, p_val).mean())
         if bce < best["bce"]:
+            p_gold = predict(gold_batches)
             best = {"bce": bce, "auc": float(np.nanmean(protocol.gold_auc(y_gold, p_gold))),
-                    "epoch": epoch, "p_val": p_val, "p_gold": p_gold}
+                    "epoch": epoch, "val": p_val, "gold": p_gold}
     return best
 
 
 SWEEP = {
-    "d_model": [128, 256],
-    "n_layers": [1, 2],
-    "dropout": [0.1, 0.3],
-    "series_dropout": [0.0, 0.15],
+    "slice_layers": [1, 2],
+    "series_layers": [1, 2],
+    "mode": ["plane", "query"],
+    "consistency": [0.0, 1.0],
 }
-FIXED = {"lr": 1e-3, "wd": 1e-2, "batch": 64, "n_heads": 4,
-         "slice_keep": 1.0, "slice_dropout": 0.1, "noise": 0.0}
+FIXED = {"lr": 5e-4, "wd": 1e-2, "batch": 32, "d_model": 256, "dropout": 0.1,
+         "slice_keep": 1.0, "slice_dropout": 0.1, "series_dropout": 0.15, "noise": 0.0}
 
 
 def main():
@@ -174,13 +191,11 @@ def main():
     bank_tr = SeriesBank(array, index, studies, split["train"])
     bank_ev = SeriesBank(array, index, studies, np.concatenate([split["val"], split["gold"]]))
 
-    configs = []
     if args.sweep:
         keys = list(SWEEP)
-        for combo in itertools.product(*[SWEEP[k] for k in keys]):
-            configs.append({**FIXED, **dict(zip(keys, combo))})
+        configs = [{**FIXED, **dict(zip(keys, c))} for c in itertools.product(*SWEEP.values())]
     else:
-        configs.append({**FIXED, **{k: getattr(args, k) for k in SWEEP}})
+        configs = [{**FIXED, **{k: getattr(args, k) for k in SWEEP}}]
 
     rows = []
     for i, config in enumerate(configs, 1):
@@ -194,8 +209,7 @@ def main():
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     if args.save_preds and len(configs) == 1:
-        np.savez(out / f"preds_{args.save_preds}.npz",
-                 val=best["p_val"], gold=best["p_gold"])
+        np.savez(out / f"preds_{args.save_preds}.npz", val=best["val"], gold=best["gold"])
     frame = dataset.pd.DataFrame(rows).sort_values("val_soft_bce")
     # A single --save-preds run must not overwrite a full sweep's results file.
     suffix = "" if len(configs) > 1 else f"_single{'_' + args.save_preds if args.save_preds else ''}"

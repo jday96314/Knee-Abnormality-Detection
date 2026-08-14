@@ -174,6 +174,8 @@ def main():
     p.add_argument("--head", default="cls", help="which read-out head of the backbone")
     p.add_argument("--epochs", type=int, default=60)
     p.add_argument("--sweep", action="store_true")
+    p.add_argument("--save-preds", metavar="TAG",
+                   help="write results/preds_<TAG>.npz for common/ensemble.py (single config only)")
     p.add_argument("--seeds", type=int, default=1)
     p.add_argument("--out", default=str(Path(__file__).resolve().parent / "results"))
     for k, v in FIXED.items():
@@ -223,8 +225,15 @@ def main():
               + "  ".join(f"{k}={config[k]}" for k in SWEEP), flush=True)
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
+    if args.save_preds and len(configs) == 1:
+        # Averaged over seeds, matching how the reported BCE for this config is computed.
+        np.savez(out / f"preds_{args.save_preds}.npz",
+                 val=np.mean([r["p_val"] for r in runs], axis=0),
+                 gold=np.mean([r["p_gold"] for r in runs], axis=0))
     frame = dataset.pd.DataFrame(rows).sort_values("val_soft_bce")
-    frame.to_csv(out / f"sweep_{args.backbone}_{args.head}.csv", index=False)
+    # A single --save-preds run must not overwrite a full sweep's results file.
+    suffix = "" if len(configs) > 1 else f"_single{'_' + args.save_preds if args.save_preds else ''}"
+    frame.to_csv(out / f"sweep_{args.backbone}_{args.head}{suffix}.csv", index=False)
     print("\nbest by val soft BCE:")
     print(frame.head(8).to_string(index=False))
 

@@ -12,6 +12,30 @@ depth would discard a different fraction of the knee in every study.
 The study head is architecture 1's fixed per-plane mean/max, not the plan's 12 pathology
 queries — reusing the settled head keeps the encoder the only thing under test.
 
+## What was tested
+
+Four configurations: **2 encoders x 2 unfreeze levels.** Like architecture 3 this is a
+hand-picked set rather than a grid, and the plan explicitly asks for "one serious run, not
+an entire initial sweep" here.
+
+| Axis | Values tried | Values *not* tried |
+|---|---|---|
+| **encoder** | MedicalNet 3D-R18, Kinetics R3D-18 | X3D, MC3, R(2+1)D, 3D Swin, SwinUNETR |
+| **`unfreeze`** (top stages) | 0, 1 | 2, 3, 4 (full) — of 4 stages |
+| volume depth | 16 slices | 8, 24, 32 |
+| in-plane resolution | 112 px | 224 (what the 2D architectures use) |
+| study head | fixed per-plane mean/max | 12 pathology queries |
+| encoder LR multiplier | 0.1x | anything else |
+| head LR / weight decay | 1e-3 / 1e-2 | — |
+| series per study | 6 | — |
+| batch size / epochs | 8 / 12 (cosine) | — |
+| augmentation | one fixed bundle, always on | bias field, 3D affine, resolution degradation |
+
+Two gaps matter most. **Resolution is confounded with architecture** — 112 px against the
+2D models' 224 px means part of this family's deficit is not attributable to being 3D. And
+**`unfreeze` stopped at 1 of 4 stages**, even though unfreezing helped both encoders and
+architecture 3 kept improving out to 8 of 12 blocks.
+
 ## Result
 
 | encoder | pretraining | unfreeze | val soft BCE | gold AUC | best epoch | minutes |

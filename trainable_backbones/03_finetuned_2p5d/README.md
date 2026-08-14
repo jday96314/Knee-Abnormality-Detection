@@ -12,17 +12,51 @@ statistics with a learned attention pool.
 | architecture 4 — frozen, hierarchical Transformer | 0.4178 | 0.8432 |
 | **architecture 3 — best (unfreeze 8, plane head)** | **0.4064** | **0.8630** |
 
-## Configurations
+## What was tested
 
-| config | mode | unfreeze | val soft BCE | gold AUC | best epoch | minutes |
-|---|---|---:|---:|---:|---:|---:|
-| plane head, unfreeze 8 | plane | 8 | **0.4064** | **0.8630** | 8 | 30.1 |
-| query head, unfreeze 4 | query | 4 | 0.4074 | 0.8599 | 9 | 22.4 |
-| plane head, unfreeze 4 | plane | 4 | 0.4081 | 0.8469 | — | 32.0 |
-| plane head, frozen encoder | plane | 0 | 0.4185 | 0.8283 | 14 | 14.9 |
+This is **not a sweep** — it is four hand-picked configurations, because each costs 15-30
+minutes against 3-9 minutes for a frozen-feature configuration. Two axes were varied and
+everything else held fixed.
+
+| Axis | Values tried | Values *not* tried |
+|---|---|---|
+| **backbone** | MRI-CORE ViT-B/16 only | OrthoFoundation (used for architectures 1-2) |
+| **`unfreeze`** (top blocks trainable) | 0, 4, 8 | 1-3, 5-7, 9-12 — **including full (12)** |
+| **head `mode`** | `plane`, `query` | — (both tested, but not crossed with `unfreeze`) |
+| encoder LR multiplier | 0.1x | anything else |
+| head LR / weight decay | 3e-4 / 1e-2 | — |
+| `d_model` | 256 | — |
+| Conv1D context `kernel` | 3 | 1, 5 (i.e. no ablation of the 2.5D module itself) |
+| slices per study | 6 series x 4 slices = 24 | any other budget |
+| batch size | 8 | — |
+| epochs | 20, cosine schedule | — |
+| augmentation | one fixed bundle, always on | any on/off or strength ablation |
+
+### The four configurations
+
+| config | backbone | mode | unfreeze | val soft BCE | gold AUC | best epoch | minutes |
+|---|---|---|---:|---:|---:|---:|---:|
+| plane head, unfreeze 8 | MRI-CORE | plane | 8 | **0.4064** | **0.8630** | 8 | 30.1 |
+| query head, unfreeze 4 | MRI-CORE | query | 4 | 0.4074 | 0.8599 | 9 | 22.4 |
+| plane head, unfreeze 4 | MRI-CORE | plane | 4 | 0.4081 | 0.8469 | — | 32.0 |
+| plane head, frozen encoder | MRI-CORE | plane | 0 | 0.4185 | 0.8283 | 14 | 14.9 |
 
 The last row is the controlled ablation: identical sampling, augmentation, context module,
 pooling and head, with only the encoder's gradients switched off.
+
+### The three most consequential gaps
+
+1. **`unfreeze` was never pushed past 8 of 12 blocks.** The trend across 0 → 4 → 8 is
+   monotone (0.4185 → 0.4081 → 0.4064) and had not flattened, so 8 is a floor, not an
+   optimum, and the headline number for this architecture is a lower bound. Full unfreezing
+   was avoided on the prior that 86M parameters against 3,479 labels would overfit — a
+   prior this run's own evidence does not support and did not test.
+2. **One backbone.** Architectures 1 and 2 were replicated on OrthoFoundation and the
+   conclusions held; architecture 3 was not, so "fine-tuning beats frozen pooling" is
+   demonstrated for MRI-CORE features specifically.
+3. **`unfreeze` and `mode` are not crossed.** The best cell is `unfreeze=8, plane` and the
+   runner-up is `unfreeze=4, query`; `unfreeze=8, query` — plausibly the best of all, since
+   both axes independently favour it — was never run.
 
 ## What it shows
 
@@ -92,14 +126,18 @@ workers fixed it. Worth knowing before scaling this script up.
 ## Limitations
 
 - **Four configurations, one seed.** The top three sit within 0.0017 BCE of each other,
-  which is almost certainly inside seed noise; only the frozen-vs-fine-tuned gap (0.012) is
-  comfortably outside it. The plane-vs-query ordering in particular should not be trusted
-  from this evidence alone.
-- **`unfreeze` and `mode` are not crossed.** The best configuration is `unfreeze=8, plane`
-  and the runner-up is `unfreeze=4, query`; `unfreeze=8, query` was never run and is the
-  obvious next cell.
+  which is well inside the ~0.003 reproducibility floor measured for this repository (see
+  the top-level README); only the frozen-vs-fine-tuned gap (0.012) is comfortably outside
+  it. The plane-vs-query ordering should not be trusted from this evidence alone — the
+  gold AUC gap (0.860 vs 0.847) is the stronger of the two signals.
 - **24 slices per study per epoch** is a compute budget, not a modelling choice. Inference
   uses the same sparse sampling, where averaging several sampling passes would be the
   natural improvement.
+- **The 2.5D context module was never ablated.** `SliceContext` is present in all four
+  configurations, so its contribution — the thing that makes this "2.5D" rather than 2D —
+  is unmeasured. `kernel=1` would make it an identity-plus-MLP and isolate it.
+- **Hybrid pooling was never ablated either.** Same issue: the learned attention pool sits
+  beside `[mean, p90, max]` in every run, so whether it adds anything over the fixed prior
+  alone is unknown.
 - **Gold AUC rests on 58 studies**, where the earlier bootstrap interval was ±0.10 — wider
   than every AUC gap in the table.

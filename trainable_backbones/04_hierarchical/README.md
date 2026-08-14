@@ -17,6 +17,31 @@ controlled curve rather than a new system differing in two ways at once.
 It also buys resolution: on frozen features every slice of every series is affordable
 (up to 48 per series), where the fine-tuned path can only afford 4.
 
+## What was tested
+
+A 2^4 = 16-cell grid, of which **9 cells completed** before the run was stopped (the pattern
+was unambiguous and it was competing for the GPU with architecture 3).
+
+| Axis | Values tried | Values *not* tried |
+|---|---|---|
+| **backbone** | MRI-CORE ViT-B/16 only | OrthoFoundation (used for architectures 1-2) |
+| **`slice_layers`** | 1, 2 | 0 (no slice Transformer), 3+ |
+| **`series_layers`** | 1, 2 | 0, 3+ |
+| **`mode`** (study head) | `plane`, `query` | — |
+| **`consistency`** weight | 0.0, 1.0 | 0.1, 10 — i.e. no strength sweep |
+| `d_model` | 256 | 128, 512 |
+| `n_heads` | 4 | 1, 8 |
+| slice position encoding | learned embedding of slice **index** | physical z / mm spacing |
+| max slices per series | 48 (stratified) | all slices; 16, 96 |
+| dropout | 0.1 | 0.3 |
+| LR / weight decay / batch | 5e-4 / 1e-2 / 32 | — |
+| `series_dropout` / `slice_dropout` | 0.15 / 0.1 | — |
+| epochs / seeds | 30 (cosine), 1 seed | multiple seeds |
+
+The 7 missing cells are `slice_layers=2` crossed with query mode and with `series_layers=2`
+— all in regions the completed cells already characterise, since query mode lost by 0.05 in
+every cell where it ran.
+
 ## Result
 
 | | val soft BCE | gold AUC |

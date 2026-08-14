@@ -14,6 +14,29 @@ The motivation is that each finding can select its own sequence — ACL from sag
 from coronal, Baker's from axial — which fixed pooling must average away. The plan rated
 this "probably the best frozen-feature model".
 
+## What was tested
+
+A full grid: **2^4 = 16 configurations, run twice (once per backbone) = 32 runs.** The slice
+pooling, features, split and augmentations are byte-identical to architecture 1 — only the
+study-level aggregation differs, which is what makes the comparison a controlled one.
+
+| Axis | Values tried | Values *not* tried |
+|---|---|---|
+| **backbone** | MRI-CORE ViT-B/16, OrthoFoundation ViT-L/16 | — |
+| **`d_model`** | 128, 256 | 64, 512 |
+| **`n_layers`** (attention depth) | 1, 2 | 3+ |
+| **`dropout`** | 0.1, 0.3 | 0.0, 0.5 |
+| **`series_dropout`** | 0.0, 0.15 | 0.3+ |
+| `n_heads` | 4 | 1, 8 |
+| number of queries | 12 (one per finding) | shared/grouped queries |
+| slice pooling | fixed `[mean, p90, max]` | learned (that is architecture 4) |
+| LR / weight decay / batch | 1e-3 / 1e-2 / 64 | — |
+| `slice_keep` / `slice_dropout` / `noise` | 1.0 / 0.1 / 0.0 | — |
+| epochs / seeds | 30 (cosine), 1 seed | multiple seeds |
+
+Note that `slice_keep` and `mixup` — two of architecture 1's swept axes — are held fixed
+here, so this grid is not a superset of that one.
+
 ## Results (MRI-CORE `cls`, 224 px, 16 configurations)
 
 | | val soft BCE | gold AUC |

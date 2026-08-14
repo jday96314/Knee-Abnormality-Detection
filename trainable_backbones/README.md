@@ -66,6 +66,39 @@ and 4 for the volumetric family (#5 and #6).
 | 2 | learned pathology attention over series | OrthoFoundation, frozen | 16 | 0.4478 | 0.7793 |
 | 5 | pretrained 3D MRI encoder per series | MedicalNet, 1 stage | 2 | 0.4555 | 0.7529 |
 
+### What was actually searched
+
+The ladder is not searched uniformly, and the asymmetry is a compute artefact rather than a
+judgement: a frozen-feature configuration costs 3-9 minutes, a pixel-level one 7-30 minutes.
+So architectures 1, 2 and 4 got full factorial grids and architectures 3, 5 and 6 got a
+handful of hand-picked cells — **including the architecture that won.**
+
+| # | Search | Backbones | Swept axes | Held fixed (not ablated) |
+|---:|---|---|---|---|
+| 1 | 2^5 grid x2 backbones (64 runs) | MRI-CORE, OrthoFoundation | head width, dropout, slice jitter, series dropout, MixUp | pooling statistics, LR, batch, resolution, epochs |
+| 2 | 2^4 grid x2 backbones (32 runs) | MRI-CORE, OrthoFoundation | `d_model`, attention depth, dropout, series dropout | n_heads, 12 queries, slice pooling, LR |
+| 3 | 4 hand-picked cells | **MRI-CORE only** | `unfreeze` (0/4/8), head mode | **2.5D context module, hybrid pooling**, LR, `d_model`, slice budget, augmentation |
+| 4 | 9 of 16 grid cells | **MRI-CORE only** | slice depth, series depth, head mode, consistency | `d_model`, n_heads, slice cap, position encoding |
+| 5,6 | 4 hand-picked cells | n/a (3D encoders) | encoder, `unfreeze` (0/1) | **resolution, depth**, study head, LR, augmentation |
+
+**The three gaps most likely to change conclusions:**
+
+1. **Architecture 3 was never pushed past 8 of 12 unfrozen blocks**, and its trend across
+   0 → 4 → 8 was still monotone and had not flattened (0.4185 → 0.4081 → 0.4064). The
+   winning number is a lower bound, and full fine-tuning is untested.
+2. **Architecture 3 ran on one backbone.** Architectures 1 and 2 were replicated on
+   OrthoFoundation and held; architecture 3's win over architecture 1 is demonstrated for
+   MRI-CORE features only.
+3. **Architecture 3's own defining components were never ablated.** The Conv1D slice-context
+   module and the hybrid pooling are present in all four cells, so the "2.5D" and "hybrid"
+   parts of the winning architecture are unmeasured — its advantage over architecture 1 is
+   currently attributable only to fine-tuning, which *was* isolated.
+
+Two smaller ones: architecture 3's `unfreeze` and head `mode` were never crossed (the
+untested `unfreeze=8, query` cell is favoured by both axes independently), and the
+volumetric family ran at 112 px against everything else's 224, confounding resolution with
+architecture.
+
 ### Three findings that survive the noise
 
 **1. Letting the encoder adapt is worth more than every aggregation, pooling and
@@ -177,23 +210,23 @@ Marginal medians over the 32 architecture-1 configurations:
 | series dropout | 0.15 vs 0.0 | 0.4207 / 0.4221 | 0.0014 |
 | MixUp | 0.4 vs 0.0 | 0.4215 / 0.4210 | 0.0005 |
 
-Read in order of effect size, and note the scale:
+**Read this table as a single negative result, not as a ranking.** Every spread in it —
+including the largest, 0.0038 — is at or below the ~0.003 reproducibility floor measured
+later (see Limitations). Individually, "a hidden layer helps", "slice jitter hurts" and
+"MixUp does nothing" are not claims this evidence can support, and an earlier version of
+this file stated the first two as findings; they are withdrawn.
 
-1. **Every augmentation axis is nearly irrelevant here.** The largest spread of any single
-   choice is 0.0038, against an architecture gap of 0.021 and a gap to baseline of 0.082.
-   The plan expected slice-sampling jitter and series dropout to be the most valuable
-   augmentations; on frozen features with 3,479 studies they are worth almost nothing.
-2. **Slice jitter actively hurts slightly** (0.4221 keeping 70% vs 0.4192 keeping all).
-   With fixed pooling over the whole stack, discarding slices only removes evidence — there
-   is no encoder being regularised, so the usual argument for it does not apply.
-3. **A hidden layer helps a little**, which is the one place capacity earns its keep.
-4. **MixUp does nothing** (0.0005), despite being the augmentation that most changes the
-   training distribution.
+What the table does support is the aggregate: **no setting of any augmentation or
+regularisation axis escapes a 0.004 band**, against an architecture gap of 0.021, a
+fine-tuning gap of 0.012, and a gap to baseline of 0.082. The plan expected slice-sampling
+jitter and series dropout to be the most valuable augmentations available; on frozen
+features with 3,479 studies, none of these knobs matter enough to measure.
 
-The honest summary is that at this scale the architecture and the frozen features decide the
-result, and the regularisation knobs are noise. That is worth knowing before spending
-effort tuning augmentation for the fine-tuned architectures, where the picture may differ
-because there is then an encoder to regularise.
+There is a mechanical reason to expect exactly that here, and it is worth separating from
+the noise argument: with fixed pooling over the whole slice stack there is **no encoder
+being regularised**, so most of these augmentations can only remove evidence rather than
+prevent memorisation. That reasoning does not extend to architectures 3, 5 and 6, where a
+trainable encoder does exist — and where, notably, augmentation was never ablated at all.
 
 ## Layout
 

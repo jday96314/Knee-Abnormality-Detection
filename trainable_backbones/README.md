@@ -25,12 +25,13 @@ on those studies, so imitating it well is not the same as diagnosing well.
 
 ## Headline result
 
-**An image-only ensemble reaches 0.878 gold ROC AUC from pixels alone.**
+**A single tuned image-only model reaches 0.884 gold ROC AUC from pixels alone.**
 
 | | gold AUC | what it is |
 |---|---:|---|
-| **architectures 3 + 4 ensembled** | **0.878** | this work — pixels only |
-| architecture 3 (best single model) | 0.863 | this work — pixels only |
+| **architecture 3, tuned (OrthoFoundation + slot head)** | **0.884** | this work — pixels only |
+| architectures 3 + 4 ensembled (pre-tuning) | 0.878 | this work — pixels only |
+| architecture 3, hand-picked configs | 0.863 | this work — pixels only |
 | architecture 1 (best frozen config) | 0.836 | this work — frozen features |
 | blended teacher it learned from | ~0.92 | text + image, needs reports |
 | image-only VLM teacher | 0.723 | 2 models, TTA, ensembled |
@@ -40,7 +41,7 @@ Two things follow. First, the distillation premise holds: report-derived knowled
 does not exist at test time, has been transferred into a model that sees only images —
 **+0.155 AUC over the image-only VLM ensemble that helped produce the labels**, closing
 roughly three quarters of the gap between that ensemble and the text-informed teacher.
-Second, **3,479 noisy soft targets beat 58 clean hard ones by a wide margin** (0.878 vs
+Second, **3,479 noisy soft targets beat 58 clean hard ones by a wide margin** (0.884 vs
 0.706).
 
 *Caveat.* The blender's parameters were fitted on the gold labels, so gold information
@@ -50,14 +51,17 @@ zero, and a clean estimate would need studies held out from the blender too.
 
 ## The ladder
 
-113 configurations across all six architectures the plan proposes: 32 + 32 + 16 + 16
-for architectures 1-2 on two backbones, 4 for architecture 3, 9 for architecture 4,
-and 4 for the volumetric family (#5 and #6).
+296 configurations across all six architectures the plan proposes: 32 + 32 + 16 + 16 for
+architectures 1-2 on two backbones, 9 for architecture 4, 4 for the volumetric family
+(#5 and #6), and for architecture 3 both the original 4 hand-picked configurations and a
+later round of **15 Optuna studies / 183 trials** over 5 backbones x 3 heads
+(see `03_finetuned_2p5d/TUNING.md`).
 
 | # | Architecture | encoder | configs | best val BCE | gold AUC |
 |---:|---|---|---:|---:|---:|
 | | baseline (train mean) | — | — | 0.4969 | — |
-| **3** | **partially fine-tuned 2.5D + hybrid pooling** | **MRI-CORE, 8 blocks trainable** | 4 | **0.4064** | **0.8630** |
+| **3** | **partially fine-tuned 2.5D, tuned** | **OrthoFoundation ViT-L, 19/24 blocks** | 183 | **0.4000** | **0.8836** |
+| 3 | partially fine-tuned 2.5D, hand-picked | MRI-CORE, 8/12 blocks | 4 | 0.4064 | 0.8630 |
 | 1 | fixed hierarchical pooling | MRI-CORE, frozen | 32 | 0.4146 | 0.8260 |
 | 1 | fixed hierarchical pooling | OrthoFoundation, frozen | 32 | 0.4146 | 0.8177 |
 | 4 | hierarchical slice+series Transformer | MRI-CORE, frozen | 9 | 0.4178 | 0.8432 |
@@ -77,27 +81,29 @@ handful of hand-picked cells — **including the architecture that won.**
 |---:|---|---|---|---|
 | 1 | 2^5 grid x2 backbones (64 runs) | MRI-CORE, OrthoFoundation | head width, dropout, slice jitter, series dropout, MixUp | pooling statistics, LR, batch, resolution, epochs |
 | 2 | 2^4 grid x2 backbones (32 runs) | MRI-CORE, OrthoFoundation | `d_model`, attention depth, dropout, series dropout | n_heads, 12 queries, slice pooling, LR |
-| 3 | 4 hand-picked cells | **MRI-CORE only** | `unfreeze` (0/4/8), head mode | **2.5D context module, hybrid pooling**, LR, `d_model`, slice budget, augmentation |
+| 3 (first pass) | 4 hand-picked cells | **MRI-CORE only** | `unfreeze` (0/4/8), head mode | **2.5D context module, hybrid pooling**, LR, `d_model`, slice budget, augmentation |
+| 3 (tuned) | 15 Optuna studies, 183 trials | MRI-CORE, OrthoFoundation, RadImageNet, DINOv2-S, DINOv3-S | `unfreeze`, LR, encoder-LR ratio, wd, batch, epochs, schedule, dropout, `kernel`, 8 augmentation dials | hybrid pooling, `d_model`, slice budget, resolution |
 | 4 | 9 of 16 grid cells | **MRI-CORE only** | slice depth, series depth, head mode, consistency | `d_model`, n_heads, slice cap, position encoding |
 | 5,6 | 4 hand-picked cells | n/a (3D encoders) | encoder, `unfreeze` (0/1) | **resolution, depth**, study head, LR, augmentation |
 
-**The three gaps most likely to change conclusions:**
+**The three gaps most likely to change conclusions — all since closed for architecture 3**
+(see `03_finetuned_2p5d/TUNING.md`), and each closed against the original expectation:
 
-1. **Architecture 3 was never pushed past 8 of 12 unfrozen blocks**, and its trend across
-   0 → 4 → 8 was still monotone and had not flattened (0.4185 → 0.4081 → 0.4064). The
-   winning number is a lower bound, and full fine-tuning is untested.
-2. **Architecture 3 ran on one backbone.** Architectures 1 and 2 were replicated on
-   OrthoFoundation and held; architecture 3's win over architecture 1 is demonstrated for
-   MRI-CORE features only.
-3. **Architecture 3's own defining components were never ablated.** The Conv1D slice-context
-   module and the hybrid pooling are present in all four cells, so the "2.5D" and "hybrid"
-   parts of the winning architecture are unmeasured — its advantage over architecture 1 is
-   currently attributable only to fine-tuning, which *was* isolated.
+1. **`unfreeze` was never pushed past 8 of 12 blocks.** *Closed:* tuned studies pick 6-10 of
+   12 for the ViT-B/S encoders and 19 of 24 for OrthoFoundation. 8/12 was indeed below the
+   optimum, and the prior that fitting 86M parameters to 3,479 labels would overfit is
+   unsupported — heavy augmentation is what makes heavy unfreezing safe.
+2. **Architecture 3 ran on one backbone.** *Closed:* five backbones. The four smaller ones
+   land within 0.003 of each other, so MRI-CORE is **not** special; only OrthoFoundation's
+   ViT-L separates, and on 3 trials per study.
+3. **Architecture 3's defining components were never ablated.** *Partly closed:* `kernel=1`
+   (which neuters the Conv1D slice-context module) wins **10 of 15** tuned studies, so the
+   "2.5D" part is not contributing. Hybrid pooling remains unablated.
 
-Two smaller ones: architecture 3's `unfreeze` and head `mode` were never crossed (the
-untested `unfreeze=8, query` cell is favoured by both axes independently), and the
-volumetric family ran at 112 px against everything else's 224, confounding resolution with
-architecture.
+Still open: the volumetric family ran at 112 px against everything else's 224, confounding
+resolution with architecture; and architectures 1, 2 and 4 have had no equivalent tuning
+round, so their numbers are hand-set-hyperparameter numbers being compared against a tuned
+one.
 
 ### Three findings that survive the noise
 
@@ -113,9 +119,12 @@ worth 0.012-0.016. This is the single most reliable lever found.
 Architecture 2's *best* configuration is worse than architecture 1's *worst* (0.4357 vs
 0.4278 on MRI-CORE; 0.4478 vs 0.4429 on OrthoFoundation), and architecture 4's pathology
 queries do worse still, two of four configurations landing *below the predict-the-mean
-baseline*. Yet in architecture 3, with a trainable encoder, the same 12 queries edge ahead
-of fixed plane pooling (0.4074 vs 0.4081, and 0.860 vs 0.847 gold AUC). The failure is not
-the idea; it is asking learned per-finding routing to operate on features that cannot move.
+baseline*. Yet in architecture 3, with a trainable encoder, the gap vanishes: across 15
+tuned studies three different heads take the top slot on five backbones, and on RadImageNet
+all three land within 0.0007. The failure is not the idea; it is asking learned per-finding
+routing to operate on features that cannot move. Once the encoder adapts, **the study-level
+aggregator stops mattering at all** — which also means the frozen-regime head comparisons
+should not be read as evidence about heads in general.
 
 **3. Pretraining corpus size beats pretraining domain match.** In the volumetric family a
 Kinetics-400 *video* network beats a MedicalNet *3D medical* network at both unfreeze levels
@@ -160,6 +169,11 @@ errors do not complement the 2D hierarchy enough to offset being 0.036 behind. N
 the opposite of the earlier `frozen_backbones` finding that prediction-level ensembling was
 the largest single improvement — that held among *comparable* members, and does not extend
 to a member this far off the pace.
+
+*These ensembles use the pre-tuning architecture 3 (0.4064 / 0.8630). The tuned single model
+now beats the best ensemble on gold AUC (0.8836 vs 0.8775), so the ensemble has not been
+rebuilt from tuned members — doing so is the obvious next step and would likely improve on
+both.*
 
 The pairing that does work is architectures 3 and 4 — the fine-tuned 2.5D model and the
 frozen hierarchical Transformer. They differ in encoder adaptation, in slice coverage
@@ -262,11 +276,19 @@ cd 04_hierarchical    && python train.py --sweep --epochs 30        # ~5 min/con
 cd 03_finetuned_2p5d  && python train.py --compare --workers 6      # ~25 min/config
 cd 05_volumetric      && python train.py --compare --workers 6      # ~7 min/config
 python common/ensemble.py                # after any trainer run with --save-preds
+
+cd 03_finetuned_2p5d && ./run_studies.sh # 15 Optuna studies, ~26 h; then:
+cd 03_finetuned_2p5d && python summarize.py --importance
 ```
 
 **Run one at a time.** Two pixel-level trainers sharing the 4090 do not merely halve
 throughput — the first attempt deadlocked, and `persistent_workers=True` plus 6 workers was
 needed to make the fine-tuning script stable at all.
+
+Two environment quirks for the tuning scripts: the conda `sqlite3` needs
+`LD_LIBRARY_PATH=$CONDA_PREFIX/lib`, and the Optuna database must live on local disk
+(`KNEE_OPTUNA_DIR`, default `/mnt/data01/knee_optuna`) because SQLite locking does not work
+on the CIFS share this repository sits on.
 
 ## Limitations
 

@@ -1,5 +1,13 @@
 # Architecture 3 — partially fine-tuned 2.5D encoder + hybrid pooling
 
+> **Superseded in part by [TUNING.md](TUNING.md).** This page describes the original four
+> hand-picked configurations on one backbone. A later round ran 15 Optuna studies over 5
+> backbones x 3 heads and reached **0.4000 BCE / 0.8836 gold AUC**, and it overturns three
+> claims below: the head choice is a non-finding once each head is tuned, the backbone
+> barely matters among the four smaller encoders, and the 2.5D context module does not earn
+> its place (`kernel=1` wins 10 of 15 studies). The frozen-vs-fine-tuned result stands and
+> is strengthened. Read that page for current numbers; this one for the controlled ablation.
+
 **The best architecture in the ladder.** Three changes from architecture 1: the encoder is
 unfrozen from the top down, through-plane context is added by a Conv1D over adjacent slice
 *embeddings*, and the series representation concatenates the fixed `[mean, p90, max]`
@@ -46,17 +54,27 @@ pooling and head, with only the encoder's gradients switched off.
 
 ### The three most consequential gaps
 
+> All three were closed by the later tuning round; each entry notes what it found.
+
 1. **`unfreeze` was never pushed past 8 of 12 blocks.** The trend across 0 → 4 → 8 is
    monotone (0.4185 → 0.4081 → 0.4064) and had not flattened, so 8 is a floor, not an
    optimum, and the headline number for this architecture is a lower bound. Full unfreezing
    was avoided on the prior that 86M parameters against 3,479 labels would overfit — a
    prior this run's own evidence does not support and did not test.
+   **Closed:** tuned studies choose 6-10 of 12 blocks for the ViT-B/S encoders and 19 of 24
+   for OrthoFoundation's ViT-L, confirming 8/12 was below the optimum and that the
+   overfitting prior was wrong — provided augmentation is strong enough to regularise it.
 2. **One backbone.** Architectures 1 and 2 were replicated on OrthoFoundation and the
    conclusions held; architecture 3 was not, so "fine-tuning beats frozen pooling" is
    demonstrated for MRI-CORE features specifically.
+   **Closed:** five backbones tested. The four smaller ones (MRI-CORE, DINOv2-S, DINOv3-S,
+   RadImageNet) land within 0.003 of each other — MRI-CORE is not special — while
+   OrthoFoundation's ViT-L takes the top slots on 3 trials per study.
 3. **`unfreeze` and `mode` are not crossed.** The best cell is `unfreeze=8, plane` and the
    runner-up is `unfreeze=4, query`; `unfreeze=8, query` — plausibly the best of all, since
    both axes independently favour it — was never run.
+   **Closed:** the tuned studies search `unfreeze` and head jointly, and find no consistent
+   head winner at any unfreeze level.
 
 ## What it shows
 
@@ -85,6 +103,14 @@ noise on BCE, but the AUC gap of 0.013 points the same way.
 This is why `StudyHead` has a `mode` switch instead of inheriting the plan's instruction to
 "keep the 12 pathology queries from model #2". The frozen evidence said drop them; testing
 both is what surfaced that the frozen evidence did not generalise.
+
+> **Later correction ([TUNING.md](TUNING.md)).** With each head separately tuned across five
+> backbones, the head is worth almost nothing and no head wins consistently — three different
+> heads take the top slot on five backbones, and on RadImageNet all three land within 0.0007.
+> The direction seen here is real for *this* hyperparameter setting but does not survive
+> tuning: the earlier plane-vs-query gaps were largely an artefact of evaluating both heads
+> at settings chosen for one of them. The safe conclusion is that the study-level aggregator
+> is not where the accuracy is.
 
 **4. Best epoch moves early.** 8-9 epochs for the fine-tuned configurations against 14 for
 the frozen one. A trainable encoder reaches its best validation loss roughly twice as fast
@@ -133,9 +159,11 @@ workers fixed it. Worth knowing before scaling this script up.
 - **24 slices per study per epoch** is a compute budget, not a modelling choice. Inference
   uses the same sparse sampling, where averaging several sampling passes would be the
   natural improvement.
-- **The 2.5D context module was never ablated.** `SliceContext` is present in all four
-  configurations, so its contribution — the thing that makes this "2.5D" rather than 2D —
-  is unmeasured. `kernel=1` would make it an identity-plus-MLP and isolate it.
+- **The 2.5D context module is not contributing.** `SliceContext` was present in all four
+  configurations here, so its effect was unmeasured. The tuned studies put `kernel` in the
+  search, where `kernel=1` reduces it to an identity-plus-projection: **10 of 15 winning
+  trials chose `kernel=1`**. The advantage over architecture 1 should be credited to
+  fine-tuning, not to through-plane context.
 - **Hybrid pooling was never ablated either.** Same issue: the learned attention pool sits
   beside `[mean, p90, max]` in every run, so whether it adds anything over the fixed prior
   alone is unknown.

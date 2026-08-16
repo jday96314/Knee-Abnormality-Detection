@@ -129,15 +129,29 @@ class HybridPool(nn.Module):
 
 
 class StudyHead(nn.Module):
-    """Series descriptors -> 12 logits, by either fixed plane pooling or query attention."""
+    """Series descriptors -> 12 logits, by fixed plane pooling, query attention or slots.
+
+    `slot` follows the head the public notebooks use (`07_public/model.py`): a learned
+    embedding per *series position* is added to the projected descriptor, and each finding
+    scores the slots with its own query vector. The difference from `query` is that the slot
+    identity is a learned parameter of the position rather than something the model has to
+    infer from content, and the attention is a single-head dot product rather than a
+    full `nn.MultiheadAttention` — much less capacity for the same job.
+    """
 
     def __init__(self, in_dim: int, mode: str = "plane", d_model: int = 256,
-                 n_labels: int = 12, dropout: float = 0.1):
+                 n_labels: int = 12, dropout: float = 0.1, n_slots: int = 8):
         super().__init__()
         self.mode = mode
         self.project = nn.Sequential(nn.LayerNorm(in_dim), nn.Linear(in_dim, d_model), nn.GELU())
         self.plane_emb = nn.Embedding(len(PLANES) + 1, d_model)
-        if mode == "query":
+        if mode == "slot":
+            self.slot_emb = nn.Parameter(torch.randn(n_slots, d_model) * 0.02)
+            self.queries = nn.Parameter(torch.randn(n_labels, d_model) * 0.02)
+            self.drop = nn.Dropout(dropout)
+            self.out = nn.Linear(d_model, n_labels)
+            self.d_model = d_model
+        elif mode == "query":
             self.queries = nn.Parameter(torch.randn(n_labels, d_model) * 0.02)
             self.attn = nn.MultiheadAttention(d_model, 4, dropout=dropout, batch_first=True)
             self.out = nn.Parameter(torch.randn(n_labels, d_model) * 0.02)
@@ -151,6 +165,12 @@ class StudyHead(nn.Module):
 
     def forward(self, series, plane_idx, mask):
         tokens = self.project(series) + self.plane_emb(plane_idx)
+        if self.mode == "slot":
+            tokens = tokens + self.slot_emb[: tokens.shape[1]].unsqueeze(0)
+            att = torch.einsum("bsh,oh->bos", tokens, self.queries) / self.d_model ** 0.5
+            att = att.masked_fill(~mask.unsqueeze(1), -1e4).softmax(-1)
+            ctx = self.drop(torch.einsum("bos,bsh->boh", att, tokens))
+            return (ctx * self.out.weight.unsqueeze(0)).sum(-1) + self.out.bias
         if self.mode == "query":
             q = self.queries.unsqueeze(0).expand(tokens.shape[0], -1, -1)
             attended, _ = self.attn(q, tokens, tokens, key_padding_mask=~mask)
@@ -166,13 +186,16 @@ class StudyHead(nn.Module):
 
 
 class Model2p5D(nn.Module):
-    def __init__(self, checkpoint: Path, unfreeze: int = 4, mode: str = "plane",
-                 d_model: int = 256, dropout: float = 0.1, kernel: int = 3, device="cuda"):
+    def __init__(self, backbone: str = "mri_core", unfreeze: int = 4, mode: str = "plane",
+                 d_model: int = 256, dropout: float = 0.1, kernel: int = 3,
+                 n_slots: int = 8, device="cuda"):
         super().__init__()
-        self.encoder = TrainableMRICore(checkpoint, unfreeze, device)
+        from encoders import TrainableEncoder
+        self.encoder = TrainableEncoder(backbone, unfreeze, device)
         self.context = SliceContext(self.encoder.dim, kernel)
         self.pool = HybridPool(self.encoder.dim)
-        self.head = StudyHead(self.pool.out_dim, mode, d_model, dropout=dropout)
+        self.head = StudyHead(self.pool.out_dim, mode, d_model, dropout=dropout,
+                              n_slots=n_slots)
 
     def forward(self, images, slice_mask, series_of_slice, plane_idx, series_mask):
         """images [B, S, K, 1, H, W] flattened by the caller; see train.py for shapes."""
